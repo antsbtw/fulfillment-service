@@ -546,6 +546,7 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 		ResourceType:   models.ResourceTypeHostingNode,
 		PlanTier:       subStatus.PlanTier,
 		Region:         region,
+		TrafficLimit:   s.getTrafficLimit(subStatus.PlanTier),
 	}
 
 	resp, err := s.Provision(ctx, provisionReq)
@@ -639,12 +640,29 @@ func (s *ProvisionService) handleProvisionError(ctx context.Context, subscriptio
 
 func (s *ProvisionService) getBundleID(planTier string) string {
 	switch planTier {
-	case "premium":
-		return "medium_3_0"
-	case "standard":
-		return "small_3_0"
+	case "premium", "3tb":
+		return "small_3_0" // 2vCPU, 2GB RAM, 60GB SSD, 3TB traffic
+	case "standard", "2tb":
+		return "micro_3_0" // 2vCPU, 1GB RAM, 40GB SSD, 2TB traffic
+	case "basic", "1tb":
+		return "nano_3_0" // 2vCPU, 512MB RAM, 20GB SSD, 1TB traffic
 	default:
 		return "nano_3_0"
+	}
+}
+
+// getTrafficLimit returns traffic limit in bytes based on plan tier
+func (s *ProvisionService) getTrafficLimit(planTier string) int64 {
+	const TB = int64(1024 * 1024 * 1024 * 1024) // 1 TB in bytes
+	switch planTier {
+	case "premium", "3tb":
+		return 3 * TB
+	case "standard", "2tb":
+		return 2 * TB
+	case "basic", "1tb":
+		return 1 * TB
+	default:
+		return 1 * TB
 	}
 }
 
