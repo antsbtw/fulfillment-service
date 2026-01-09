@@ -1,0 +1,207 @@
+package http
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/wenwu/saas-platform/fulfillment-service/internal/models"
+	"github.com/wenwu/saas-platform/fulfillment-service/internal/service"
+)
+
+type Handler struct {
+	provisionService *service.ProvisionService
+}
+
+func NewHandler(provisionService *service.ProvisionService) *Handler {
+	return &Handler{
+		provisionService: provisionService,
+	}
+}
+
+// ==================== Internal API Handlers ====================
+
+// Provision handles resource provisioning requests from subscription-service
+func (h *Handler) Provision(c *gin.Context) {
+	var req models.ProvisionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.provisionService.Provision(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// Deprovision handles resource deprovisioning requests
+func (h *Handler) Deprovision(c *gin.Context) {
+	var req models.DeprovisionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.provisionService.Deprovision(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetResourceStatus gets resource status by ID
+func (h *Handler) GetResourceStatus(c *gin.Context) {
+	resourceID := c.Param("id")
+	if resourceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "resource id required"})
+		return
+	}
+
+	resp, err := h.provisionService.GetResourceStatus(c.Request.Context(), resourceID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "resource not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetResourcesBySubscription gets resources for a subscription
+func (h *Handler) GetResourcesBySubscription(c *gin.Context) {
+	subscriptionID := c.Param("subscription_id")
+	if subscriptionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "subscription id required"})
+		return
+	}
+
+	resp, err := h.provisionService.GetResourcesBySubscription(c.Request.Context(), subscriptionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"resources": resp})
+}
+
+// ==================== Node Callback Handlers ====================
+
+// NodeReady handles callback when node software is ready
+func (h *Handler) NodeReady(c *gin.Context) {
+	var req models.NodeReadyCallback
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.provisionService.HandleNodeReady(c.Request.Context(), &req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// NodeFailed handles callback when node installation fails
+func (h *Handler) NodeFailed(c *gin.Context) {
+	var req models.NodeFailedCallback
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.provisionService.HandleNodeFailed(c.Request.Context(), &req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ==================== User API Handlers ====================
+
+// GetMyNode gets the current user's node status
+func (h *Handler) GetMyNode(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	resourceType := c.DefaultQuery("type", models.ResourceTypeHostingNode)
+
+	resp, err := h.provisionService.GetUserNodeStatus(c.Request.Context(), userID.(string), resourceType)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// CreateMyNode creates a new node for the current user
+// POST /api/v1/my/node
+func (h *Handler) CreateMyNode(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	var req models.CreateNodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.provisionService.CreateUserNode(c.Request.Context(), userID.(string), req.Region)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if !resp.Success {
+		c.JSON(http.StatusBadRequest, resp)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// DeleteMyNode deletes the current user's node
+// DELETE /api/v1/my/node
+func (h *Handler) DeleteMyNode(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	resp, err := h.provisionService.DeleteUserNode(c.Request.Context(), userID.(string))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if !resp.Success {
+		c.JSON(http.StatusNotFound, resp)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetRegions returns available regions
+func (h *Handler) GetRegions(c *gin.Context) {
+	resp, err := h.provisionService.GetAvailableRegions(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}

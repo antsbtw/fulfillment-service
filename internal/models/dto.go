@@ -1,0 +1,214 @@
+package models
+
+// ==================== Internal API DTOs ====================
+
+// ProvisionRequest is sent by subscription-service to create a resource
+type ProvisionRequest struct {
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+	UserID         string `json:"user_id" binding:"required"`
+	ResourceType   string `json:"resource_type" binding:"required"` // hosting_node, otun_node
+	PlanTier       string `json:"plan_tier" binding:"required"`     // basic, standard, premium
+	Region         string `json:"region"`                           // Optional, auto-select if empty
+	TrafficLimit   int64  `json:"traffic_limit"`                    // Optional, in bytes
+}
+
+// ProvisionResponse is returned after starting provisioning
+type ProvisionResponse struct {
+	ResourceID            string `json:"resource_id"`
+	Status                string `json:"status"`
+	EstimatedReadySeconds int    `json:"estimated_ready_seconds"`
+	Message               string `json:"message"`
+}
+
+// DeprovisionRequest is sent to delete a resource
+type DeprovisionRequest struct {
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+	ResourceID     string `json:"resource_id"`
+	Reason         string `json:"reason"`
+}
+
+// DeprovisionResponse is returned after starting deprovisioning
+type DeprovisionResponse struct {
+	ResourceID string `json:"resource_id"`
+	Status     string `json:"status"`
+	Message    string `json:"message"`
+}
+
+// ResourceStatusResponse is the detailed resource status
+type ResourceStatusResponse struct {
+	ResourceID     string  `json:"resource_id"`
+	SubscriptionID string  `json:"subscription_id"`
+	UserID         string  `json:"user_id"`
+	ResourceType   string  `json:"resource_type"`
+	Provider       string  `json:"provider"`
+	Region         string  `json:"region"`
+	Status         string  `json:"status"`
+	PublicIP       *string `json:"public_ip,omitempty"`
+	APIPort        int     `json:"api_port,omitempty"`
+	APIKey         *string `json:"api_key,omitempty"`
+	VlessPort      int     `json:"vless_port,omitempty"`
+	SSPort         int     `json:"ss_port,omitempty"`
+	PublicKey      *string `json:"public_key,omitempty"`
+	ShortID        *string `json:"short_id,omitempty"`
+	PlanTier       string  `json:"plan_tier"`
+	TrafficLimitGB float64 `json:"traffic_limit_gb"`
+	TrafficUsedGB  float64 `json:"traffic_used_gb"`
+	TrafficPercent float64 `json:"traffic_percent"`
+	ReadyAt        *string `json:"ready_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	ErrorMessage   *string `json:"error_message,omitempty"`
+}
+
+// ==================== User API DTOs ====================
+
+// HostingStatus represents different hosting states for frontend
+type HostingStatus string
+
+const (
+	HostingStatusNoSubscription      HostingStatus = "no_subscription"      // 无订阅
+	HostingStatusSubscribedNoNode    HostingStatus = "subscribed_no_node"   // 有订阅无节点
+	HostingStatusNodeCreating        HostingStatus = "node_creating"        // 节点创建中
+	HostingStatusNodeActive          HostingStatus = "node_active"          // 节点正常运行
+	HostingStatusNodeFailed          HostingStatus = "node_failed"          // 节点创建失败
+	HostingStatusSubscriptionExpired HostingStatus = "subscription_expired" // 订阅已过期
+)
+
+// UserNodeStatusResponse is returned to users querying their node
+type UserNodeStatusResponse struct {
+	// 主状态字段 - 前端根据此字段决定显示逻辑
+	HostingStatus HostingStatus `json:"hosting_status"`
+
+	// 订阅信息 (如果有)
+	HasSubscription bool              `json:"has_subscription"`
+	Subscription    *SubscriptionInfo `json:"subscription,omitempty"`
+
+	// 节点信息 (如果有)
+	HasNode bool          `json:"has_node"`
+	Node    *UserNodeInfo `json:"node,omitempty"`
+
+	// 节点创建进度 (创建中时使用)
+	CreationProgress *NodeCreationProgress `json:"creation_progress,omitempty"`
+
+	// 友好提示
+	Message string `json:"message,omitempty"`
+}
+
+// SubscriptionInfo contains subscription details
+type SubscriptionInfo struct {
+	SubscriptionID string `json:"subscription_id"`
+	Status         string `json:"status"`
+	PlanTier       string `json:"plan_tier"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	AutoRenew      bool   `json:"auto_renew"`
+}
+
+// NodeCreationProgress tracks node creation steps
+type NodeCreationProgress struct {
+	CurrentStep int    `json:"current_step"` // 1-4
+	TotalSteps  int    `json:"total_steps"`  // 4
+	StepName    string `json:"step_name"`    // 当前步骤名称
+	Steps       []NodeCreationStep `json:"steps"`
+}
+
+// NodeCreationStep represents a single creation step
+type NodeCreationStep struct {
+	Step      int    `json:"step"`
+	Name      string `json:"name"`
+	Status    string `json:"status"` // pending, in_progress, completed, failed
+	StartedAt string `json:"started_at,omitempty"`
+}
+
+// UserNodeInfo contains node info visible to users
+type UserNodeInfo struct {
+	ResourceID     string  `json:"resource_id"`
+	Region         string  `json:"region"`
+	RegionName     string  `json:"region_name"`
+	Status         string  `json:"status"`
+	PublicIP       *string `json:"public_ip,omitempty"`
+	APIPort        int     `json:"api_port,omitempty"`
+	APIKey         *string `json:"api_key,omitempty"`
+	VlessPort      int     `json:"vless_port,omitempty"`
+	SSPort         int     `json:"ss_port,omitempty"`
+	PublicKey      *string `json:"public_key,omitempty"`
+	ShortID        *string `json:"short_id,omitempty"`
+	PlanTier       string  `json:"plan_tier"`
+	TrafficLimitGB float64 `json:"traffic_limit_gb"`
+	TrafficUsedGB  float64 `json:"traffic_used_gb"`
+	TrafficPercent float64 `json:"traffic_percent"`
+	CreatedAt      string  `json:"created_at"`
+}
+
+// RegionListResponse is the list of available regions
+type RegionListResponse struct {
+	Regions []RegionInfo `json:"regions"`
+}
+
+// RegionInfo is a single region entry
+type RegionInfo struct {
+	Code      string `json:"code"`
+	Name      string `json:"name"`
+	Provider  string `json:"provider"`
+	Available bool   `json:"available"`
+}
+
+// CreateNodeRequest is for user-initiated node creation
+type CreateNodeRequest struct {
+	Region string `json:"region" binding:"required"`
+}
+
+// RecreateNodeRequest is for user-initiated node recreation
+type RecreateNodeRequest struct {
+	Region string `json:"region" binding:"required"`
+}
+
+// DeleteNodeResponse is returned after node deletion
+type DeleteNodeResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// CreateNodeResponse is returned after starting node creation
+type CreateNodeResponse struct {
+	Success          bool                  `json:"success"`
+	ResourceID       string                `json:"resource_id,omitempty"`
+	Status           string                `json:"status"` // creating, failed
+	CreationProgress *NodeCreationProgress `json:"creation_progress,omitempty"`
+	Message          string                `json:"message"`
+}
+
+// ==================== Callback DTOs ====================
+
+// NodeReadyCallback is sent by node agent when ready
+type NodeReadyCallback struct {
+	ResourceID string `json:"resource_id" binding:"required"`
+	PublicIP   string `json:"public_ip" binding:"required"`
+	APIPort    int    `json:"api_port"`
+	APIKey     string `json:"api_key"`
+	VlessPort  int    `json:"vless_port"`
+	SSPort     int    `json:"ss_port"`
+	PublicKey  string `json:"public_key"`
+	ShortID    string `json:"short_id"`
+}
+
+// NodeFailedCallback is sent when node creation fails
+type NodeFailedCallback struct {
+	ResourceID   string `json:"resource_id" binding:"required"`
+	ErrorMessage string `json:"error_message"`
+}
+
+// ==================== Subscription Service Callback ====================
+
+// SubscriptionCallback is sent to subscription-service on status changes
+type SubscriptionCallback struct {
+	SubscriptionID string  `json:"subscription_id"`
+	ResourceID     string  `json:"resource_id"`
+	Status         string  `json:"status"`      // provisioning, installing, active, failed, deleted
+	PublicIP       *string `json:"public_ip,omitempty"`
+	APIPort        int     `json:"api_port,omitempty"`
+	APIKey         *string `json:"api_key,omitempty"`
+	VlessPort      int     `json:"vless_port,omitempty"`
+	SSPort         int     `json:"ss_port,omitempty"`
+	PublicKey      *string `json:"public_key,omitempty"`
+	ShortID        *string `json:"short_id,omitempty"`
+	ErrorMessage   *string `json:"error_message,omitempty"`
+}
