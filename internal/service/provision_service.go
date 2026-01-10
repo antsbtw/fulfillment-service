@@ -531,11 +531,12 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 				Message:          "Node is already being created. Please wait.",
 			}, nil
 		case models.StatusFailed:
-			return &models.CreateNodeResponse{
-				Success: false,
-				Status:  "failed",
-				Message: "You have a failed node. Please delete it first before creating a new one.",
-			}, nil
+			// 自动清理失败的节点，允许用户重新创建
+			log.Printf("[CreateUserNode] Auto-cleaning failed node: resource_id=%s", existing.ID)
+			if err := s.cleanupFailedResource(ctx, existing); err != nil {
+				log.Printf("[CreateUserNode] Warning: failed to cleanup failed node: %v", err)
+			}
+			// 继续创建新节点
 		}
 	}
 
@@ -703,4 +704,35 @@ func (s *ProvisionService) resourceToStatusResponse(r *models.Resource) *models.
 	}
 
 	return resp
+}
+
+// cleanupFailedResource cleans up a failed resource by marking it as deleted
+// This allows users to retry creating a new node without manually deleting the failed one
+func (s *ProvisionService) cleanupFailedResource(ctx context.Context, resource *models.Resource) error {
+	log.Printf("[cleanupFailedResource] Cleaning up failed resource: id=%s, user=%s", resource.ID, resource.UserID)
+
+	// 1. 如果有外部资源（如 Lightsail 实例），尝试清理
+	if resource.InstanceID != nil && *resource.InstanceID != "" {
+		log.Printf("[cleanupFailedResource] Attempting to cleanup external resource: %s", *resource.InstanceID)
+		// 调用 hosting service 删除（最佳努力，失败也继续）
+		if _, err := s.hostingClient.DeleteNode(ctx, *resource.InstanceID); err != nil {
+			log.Printf("[cleanupFailedResource] Warning: failed to delete external resource: %v", err)
+			// 继续执行，不阻塞
+		}
+	}
+
+	// 2. 将资源标记为已删除
+	now := time.Now()
+	resource.Status = models.StatusDeleted
+	resource.DeletedAt = &now
+
+	if err := s.resourceRepo.Update(ctx, resource); err != nil {
+		return fmt.Errorf("failed to mark resource as deleted: %w", err)
+	}
+
+	// 3. 记录操作日志
+	s.logRepo.LogAction(ctx, resource.ID, "auto_cleanup", "deleted", "Auto-cleaned failed resource to allow retry")
+
+	log.Printf("[cleanupFailedResource] Successfully cleaned up failed resource: %s", resource.ID)
+	return nil
 }
