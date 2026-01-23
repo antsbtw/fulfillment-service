@@ -46,6 +46,8 @@ func main() {
 		cfg.InternalSecret,
 	)
 
+	otunClient := client.NewOTunClient(cfg.Services.OTunManagerURL)
+
 	// Initialize services
 	provisionService := service.NewProvisionService(
 		cfg,
@@ -56,8 +58,16 @@ func main() {
 		subscriptionClient,
 	)
 
+	vpnService := service.NewVPNService(
+		cfg,
+		resourceRepo,
+		logRepo,
+		otunClient,
+		subscriptionClient,
+	)
+
 	// Initialize HTTP server
-	server := http.NewServer(cfg, provisionService)
+	server := http.NewServer(cfg, provisionService, vpnService)
 
 	// Start server in goroutine
 	go func() {

@@ -130,7 +130,17 @@ type SubscriptionStatusResponse struct {
 
 // GetUserHostingSubscription checks if user has an active hosting subscription
 func (c *SubscriptionClient) GetUserHostingSubscription(ctx context.Context, userID string) (*SubscriptionStatusResponse, error) {
-	url := fmt.Sprintf("%s/api/internal/users/%s/active/obox/hosting", c.baseURL, userID)
+	return c.getUserSubscription(ctx, userID, "obox", "hosting")
+}
+
+// GetUserVPNSubscription checks if user has an active VPN subscription
+func (c *SubscriptionClient) GetUserVPNSubscription(ctx context.Context, userID string) (*SubscriptionStatusResponse, error) {
+	return c.getUserSubscription(ctx, userID, "otun", "vpn")
+}
+
+// getUserSubscription is a generic method to check user subscription status
+func (c *SubscriptionClient) getUserSubscription(ctx context.Context, userID, app, serviceType string) (*SubscriptionStatusResponse, error) {
+	url := fmt.Sprintf("%s/api/internal/users/%s/active/%s/%s", c.baseURL, userID, app, serviceType)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

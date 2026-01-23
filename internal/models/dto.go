@@ -6,17 +6,20 @@ package models
 type ProvisionRequest struct {
 	SubscriptionID string `json:"subscription_id" binding:"required"`
 	UserID         string `json:"user_id" binding:"required"`
-	ResourceType   string `json:"resource_type" binding:"required"` // hosting_node, otun_node
-	PlanTier       string `json:"plan_tier" binding:"required"`     // basic, standard, premium
+	UserEmail      string `json:"user_email"`                       // Optional, for VPN user creation
+	ResourceType   string `json:"resource_type" binding:"required"` // hosting_node, otun_node, vpn_user
+	PlanTier       string `json:"plan_tier" binding:"required"`     // basic, standard, premium, unlimited
 	Region         string `json:"region"`                           // Optional, auto-select if empty
 	TrafficLimit   int64  `json:"traffic_limit"`                    // Optional, in bytes
+	ExpireDays     int    `json:"expire_days"`                      // Optional, for VPN user, default 30
 }
 
 // ProvisionResponse is returned after starting provisioning
 type ProvisionResponse struct {
 	ResourceID            string `json:"resource_id"`
 	Status                string `json:"status"`
-	EstimatedReadySeconds int    `json:"estimated_ready_seconds"`
+	EstimatedReadySeconds int    `json:"estimated_ready_seconds,omitempty"`
+	VPNUserID             string `json:"vpn_user_id,omitempty"` // For VPN user, the UUID in otun-manager
 	Message               string `json:"message"`
 }
 
@@ -211,4 +214,69 @@ type SubscriptionCallback struct {
 	PublicKey      *string `json:"public_key,omitempty"`
 	ShortID        *string `json:"short_id,omitempty"`
 	ErrorMessage   *string `json:"error_message,omitempty"`
+}
+
+// ==================== VPN User DTOs ====================
+
+// VPNStatus represents different VPN states for frontend
+type VPNStatus string
+
+const (
+	VPNStatusNoSubscription      VPNStatus = "no_subscription"      // 无订阅
+	VPNStatusActive              VPNStatus = "active"               // VPN 正常可用
+	VPNStatusExpired             VPNStatus = "expired"              // 已过期
+	VPNStatusDisabled            VPNStatus = "disabled"             // 已禁用
+)
+
+// VPNStatusResponse is returned to users querying their VPN status
+type VPNStatusResponse struct {
+	// 主状态字段 - 前端根据此字段决定显示逻辑
+	VPNStatus VPNStatus `json:"vpn_status"`
+
+	// 订阅信息 (如果有)
+	HasSubscription bool              `json:"has_subscription"`
+	Subscription    *SubscriptionInfo `json:"subscription,omitempty"`
+
+	// VPN 用户信息 (如果有)
+	HasVPNUser bool         `json:"has_vpn_user"`
+	VPNUser    *VPNUserInfo `json:"vpn_user,omitempty"`
+
+	// 友好提示
+	Message string `json:"message,omitempty"`
+}
+
+// VPNUserInfo contains VPN user info visible to users
+type VPNUserInfo struct {
+	ResourceID     string  `json:"resource_id"`
+	VPNUserID      string  `json:"vpn_user_id"`      // UUID in otun-manager
+	Status         string  `json:"status"`
+	PlanTier       string  `json:"plan_tier"`
+	TrafficLimitGB float64 `json:"traffic_limit_gb"`
+	TrafficUsedGB  float64 `json:"traffic_used_gb"`
+	TrafficPercent float64 `json:"traffic_percent"`
+	ExpireAt       string  `json:"expire_at,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+}
+
+// VPNSubscribeResponse is returned when getting VPN subscription config
+type VPNSubscribeResponse struct {
+	SubscribeURL string        `json:"subscribe_url"`
+	DeviceID     string        `json:"device_id"`
+	Protocols    []VPNProtocol `json:"protocols,omitempty"`
+	ExpireAt     string        `json:"expire_at,omitempty"`
+	Message      string        `json:"message,omitempty"`
+}
+
+// VPNProtocol represents a single VPN protocol configuration
+type VPNProtocol struct {
+	Protocol string `json:"protocol"` // vless, shadowsocks
+	URL      string `json:"url"`
+	Node     string `json:"node"` // primary, backup
+}
+
+// UpdateVPNUserRequest is for updating VPN user (extend/upgrade)
+type UpdateVPNUserRequest struct {
+	TrafficLimit int64  `json:"traffic_limit,omitempty"` // New traffic limit in bytes
+	ExtendDays   int    `json:"extend_days,omitempty"`   // Days to extend
+	PlanTier     string `json:"plan_tier,omitempty"`     // New plan tier
 }

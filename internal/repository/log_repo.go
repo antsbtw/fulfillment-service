@@ -84,3 +84,15 @@ func (r *LogRepository) LogAction(ctx context.Context, resourceID, action, statu
 	}
 	return r.Create(ctx, logEntry)
 }
+
+// LogActionWithMetadata is a helper to log an action with metadata
+func (r *LogRepository) LogActionWithMetadata(ctx context.Context, resourceID, action, status, message string, metadata map[string]interface{}) error {
+	logEntry := &models.ResourceLog{
+		ResourceID: resourceID,
+		Action:     action,
+		Status:     status,
+		Message:    message,
+		Metadata:   metadata,
+	}
+	return r.Create(ctx, logEntry)
+}

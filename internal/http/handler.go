@@ -10,11 +10,13 @@ import (
 
 type Handler struct {
 	provisionService *service.ProvisionService
+	vpnService       *service.VPNService
 }
 
-func NewHandler(provisionService *service.ProvisionService) *Handler {
+func NewHandler(provisionService *service.ProvisionService, vpnService *service.VPNService) *Handler {
 	return &Handler{
 		provisionService: provisionService,
+		vpnService:       vpnService,
 	}
 }
 
@@ -28,7 +30,17 @@ func (h *Handler) Provision(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.provisionService.Provision(c.Request.Context(), &req)
+	var resp *models.ProvisionResponse
+	var err error
+
+	// Route to appropriate service based on resource type
+	switch req.ResourceType {
+	case models.ResourceTypeVPNUser:
+		resp, err = h.vpnService.ProvisionVPNUser(c.Request.Context(), &req)
+	default:
+		resp, err = h.provisionService.Provision(c.Request.Context(), &req)
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -204,4 +216,62 @@ func (h *Handler) GetRegions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// ==================== VPN API Handlers ====================
+
+// GetMyVPN gets the current user's VPN status
+func (h *Handler) GetMyVPN(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	resp, err := h.vpnService.GetUserVPNStatus(c.Request.Context(), userID.(string))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetMyVPNSubscribe gets the VPN subscription configuration for the current user
+func (h *Handler) GetMyVPNSubscribe(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	resp, err := h.vpnService.GetUserVPNSubscribeConfig(c.Request.Context(), userID.(string))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// UpdateVPNResource updates a VPN resource (extend/upgrade)
+func (h *Handler) UpdateVPNResource(c *gin.Context) {
+	resourceID := c.Param("id")
+	if resourceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "resource id required"})
+		return
+	}
+
+	var req models.UpdateVPNUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.vpnService.UpdateVPNUser(c.Request.Context(), resourceID, &req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "VPN user updated successfully"})
 }

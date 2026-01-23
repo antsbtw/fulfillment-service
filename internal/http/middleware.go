@@ -1,6 +1,7 @@
 package http
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -56,10 +57,11 @@ func JWTAuthMiddleware(secretKey string) gin.HandlerFunc {
 }
 
 // InternalAuthMiddleware validates internal service calls
+// 使用常量时间比较防止时序攻击
 func InternalAuthMiddleware(internalSecret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		secret := c.GetHeader("X-Internal-Secret")
-		if secret == "" || secret != internalSecret {
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(internalSecret)) != 1 {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized internal access"})
 			c.Abort()
 			return
@@ -69,10 +71,11 @@ func InternalAuthMiddleware(internalSecret string) gin.HandlerFunc {
 }
 
 // AdminAuthMiddleware validates admin API key
+// 使用常量时间比较防止时序攻击
 func AdminAuthMiddleware(adminAPIKey string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-Admin-API-Key")
-		if apiKey == "" || apiKey != adminAPIKey {
+		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(adminAPIKey)) != 1 {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized admin access"})
 			c.Abort()
 			return

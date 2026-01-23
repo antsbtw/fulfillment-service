@@ -21,6 +21,7 @@ const (
 const (
 	ResourceTypeHostingNode = "hosting_node"
 	ResourceTypeOTunNode    = "otun_node"
+	ResourceTypeVPNUser     = "vpn_user"
 )
 
 // Cloud provider constants
