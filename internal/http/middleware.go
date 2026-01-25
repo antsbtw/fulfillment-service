@@ -9,16 +9,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWTClaims represents JWT token claims
-type JWTClaims struct {
-	jwt.RegisteredClaims
-	UID      string `json:"uid"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	UserType string `json:"userType"`
-}
-
 // JWTAuthMiddleware validates JWT tokens for user endpoints
+// 兼容 auth-service 签发的 JWT 格式，使用 MapClaims 解析
 func JWTAuthMiddleware(secretKey string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -35,8 +27,7 @@ func JWTAuthMiddleware(secretKey string) gin.HandlerFunc {
 			return
 		}
 
-		claims := &JWTClaims{}
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			return []byte(secretKey), nil
 		})
 
@@ -46,11 +37,20 @@ func JWTAuthMiddleware(secretKey string) gin.HandlerFunc {
 			return
 		}
 
-		// Set user info in context
-		c.Set("userID", claims.UID)
-		c.Set("username", claims.Username)
-		c.Set("role", claims.Role)
-		c.Set("userType", claims.UserType)
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token claims"})
+			c.Abort()
+			return
+		}
+
+		// 提取用户信息，兼容 auth-service 的 JWT 格式
+		// 优先使用 uid 字段，其次使用 sub 字段（标准 JWT claim）
+		if uid, ok := claims["uid"].(string); ok {
+			c.Set("userID", uid)
+		} else if sub, ok := claims["sub"].(string); ok {
+			c.Set("userID", sub)
+		}
 
 		c.Next()
 	}
