@@ -35,10 +35,10 @@ RUN chown -R appuser:appgroup /app
 # Switch to non-root user
 USER appuser
 
-EXPOSE 8005
+EXPOSE 8014
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8005/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8014/health || exit 1
 
 CMD ["./fulfillment-service"]

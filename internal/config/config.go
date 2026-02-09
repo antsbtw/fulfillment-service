@@ -71,7 +71,7 @@ type ServicesConfig struct {
 func Load() *Config {
 	cfg := &Config{
 		Server: ServerConfig{
-			Port: getEnv("SERVER_PORT", "8005"),
+			Port: getEnv("SERVER_PORT", "8014"),
 			Mode: getEnv("GIN_MODE", "release"), // 默认为 release 模式
 		},
 		Database: DatabaseConfig{
@@ -79,7 +79,7 @@ func Load() *Config {
 			Port:     getEnv("DB_PORT", "5432"),
 			User:     getEnv("DB_USER", "saas_user"),
 			Password: getEnv("DB_PASSWORD", "saas_pass"),
-			DBName:   getEnv("DB_NAME", "saas_db"),
+			DBName:   getEnv("DB_NAME", "fulfillment_db"),
 			Schema:   getEnv("DB_SCHEMA", "fulfillment"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
@@ -87,7 +87,7 @@ func Load() *Config {
 			SecretKey: getEnv("JWT_SECRET_KEY", ""),
 		},
 		Hosting: HostingConfig{
-			ServiceURL:    getEnv("HOSTING_SERVICE_URL", "http://localhost:8010"),
+			ServiceURL:    getEnv("HOSTING_SERVICE_URL", "http://localhost:8023"),
 			AdminKey:      getEnv("HOSTING_ADMIN_KEY", ""),
 			CloudProvider: getEnv("HOSTING_CLOUD_PROVIDER", "lightsail"),
 			DefaultRegion: getEnv("HOSTING_DEFAULT_REGION", "us-east-1"),
@@ -101,9 +101,9 @@ func Load() *Config {
 			Key: getEnv("ENCRYPTION_KEY", ""),
 		},
 		Services: ServicesConfig{
-			SubscriptionServiceURL: getEnv("SUBSCRIPTION_SERVICE_URL", "http://localhost:8003"),
+			SubscriptionServiceURL: getEnv("SUBSCRIPTION_SERVICE_URL", "http://localhost:8012"),
 			LicenseServiceURL:      getEnv("LICENSE_SERVICE_URL", "http://localhost:8004"),
-			OTunManagerURL:         getEnv("OTUN_MANAGER_URL", "http://localhost:8380"),
+			OTunManagerURL:         getEnv("OTUN_MANAGER_URL", "http://localhost:8022"),
 		},
 		InternalSecret: getEnv("INTERNAL_SECRET", ""),
 	}

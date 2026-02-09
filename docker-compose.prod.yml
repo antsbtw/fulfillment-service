@@ -1,0 +1,39 @@
+# 生产部署配置 - fulfillment-service
+#
+# 首次部署:
+#   1. 创建数据库: docker exec v3-postgres psql -U saas_user -d postgres -c "CREATE DATABASE fulfillment_db;"
+#   2. docker compose -f docker-compose.prod.yml up -d
+
+services:
+  fulfillment-service:
+    image: ghcr.io/antsbtw/fulfillment-service:main
+    container_name: fulfillment-service
+    restart: always
+    network_mode: host
+    environment:
+      SERVER_PORT: 8014
+      GIN_MODE: release
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USER: saas_user
+      DB_PASSWORD: saas_pass
+      DB_NAME: fulfillment_db
+      DB_SCHEMA: fulfillment
+      DB_SSLMODE: disable
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me}
+      INTERNAL_SECRET: ${INTERNAL_SECRET:-change-me}
+      HOSTING_SERVICE_URL: http://localhost:8023
+      HOSTING_ADMIN_KEY: ${ADMIN_API_KEY:-change-me}
+      HOSTING_CLOUD_PROVIDER: lightsail
+      HOSTING_DEFAULT_REGION: us-east-1
+      SUBSCRIPTION_SERVICE_URL: http://localhost:8012
+      LICENSE_SERVICE_URL: http://localhost:8004
+      NODE_API_PORT: 8080
+      NODE_VLESS_PORT: 443
+      LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8014/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
