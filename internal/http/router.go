@@ -129,6 +129,9 @@ func (s *Server) setupRoutes() {
 		internal.GET("/resources/:id", s.handler.GetResourceStatus)
 		internal.GET("/subscriptions/:subscription_id/resources", s.handler.GetResourcesBySubscription)
 
+		// User resource queries (called by user-portal)
+		internal.GET("/users/:user_id/resources", s.handler.GetUserResources)
+
 		// VPN resource update (extend/upgrade)
 		internal.PUT("/resources/:id/vpn", s.handler.UpdateVPNResource)
 	}

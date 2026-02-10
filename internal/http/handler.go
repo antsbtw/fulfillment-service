@@ -100,6 +100,23 @@ func (h *Handler) GetResourcesBySubscription(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"resources": resp})
 }
 
+// GetUserResources gets all resources for a user (internal API, called by user-portal)
+func (h *Handler) GetUserResources(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+
+	resp, err := h.provisionService.GetUserNodeStatus(c.Request.Context(), userID, models.ResourceTypeHostingNode)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
 // ==================== Node Callback Handlers ====================
 
 // NodeReady handles callback when node software is ready
