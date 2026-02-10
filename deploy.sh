@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# 加载环境变量 (包含 INTERNAL_SECRET, JWT_SECRET_KEY 等)
+if [ -f ~/.env.v3 ]; then
+    set -a
+    source ~/.env.v3
+    set +a
+fi
+
 echo "=== Deploying fulfillment-service ==="
 
 docker exec v3-postgres psql -U saas_user -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'fulfillment_db'" | grep -q 1 || \
