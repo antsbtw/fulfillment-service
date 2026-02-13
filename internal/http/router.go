@@ -177,7 +177,7 @@ func (s *Server) setupRoutes() {
 	internalAdmin.Use(InternalAuthMiddleware(s.cfg.InternalSecret))
 	{
 		// DB Browser API (通用数据库浏览)
-		dbAdminHandler := NewDBAdminHandler(s.db, "public")
+		dbAdminHandler := NewDBAdminHandler(s.db, "fulfillment")
 		dbAdmin := internalAdmin.Group("/db")
 		{
 			dbAdmin.GET("/tables", dbAdminHandler.ListTables)
