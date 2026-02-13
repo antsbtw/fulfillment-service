@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/config"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/service"
 )
@@ -79,6 +80,7 @@ type Server struct {
 	router  *gin.Engine
 	handler *Handler
 	cfg     *config.Config
+	db      *pgxpool.Pool
 }
 
 // 全局速率限制器: 每用户每分钟最多 30 次请求
@@ -88,7 +90,7 @@ var userRateLimiter = NewRateLimiter(30, time.Minute)
 // 说明: 业务规则限制每用户只能有一个托管节点，5 次足够处理重试和重建场景
 var createRateLimiter = NewRateLimiter(5, time.Hour)
 
-func NewServer(cfg *config.Config, provisionService *service.ProvisionService, vpnService *service.VPNService) *Server {
+func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.ProvisionService, vpnService *service.VPNService) *Server {
 	gin.SetMode(cfg.Server.Mode)
 	router := gin.New()
 
@@ -102,6 +104,7 @@ func NewServer(cfg *config.Config, provisionService *service.ProvisionService, v
 		router:  router,
 		handler: handler,
 		cfg:     cfg,
+		db:      db,
 	}
 
 	s.setupRoutes()
@@ -167,6 +170,20 @@ func (s *Server) setupRoutes() {
 	public := s.router.Group("/api/v1/public")
 	{
 		public.GET("/regions", s.handler.GetRegions)
+	}
+
+	// Internal Admin API (供 user-portal 调用，需要 Internal Secret)
+	internalAdmin := s.router.Group("/api/internal/admin")
+	internalAdmin.Use(InternalAuthMiddleware(s.cfg.InternalSecret))
+	{
+		// DB Browser API (通用数据库浏览)
+		dbAdminHandler := NewDBAdminHandler(s.db, "public")
+		dbAdmin := internalAdmin.Group("/db")
+		{
+			dbAdmin.GET("/tables", dbAdminHandler.ListTables)
+			dbAdmin.GET("/tables/:table/schema", dbAdminHandler.GetTableSchema)
+			dbAdmin.GET("/tables/:table/rows", dbAdminHandler.QueryRows)
+		}
 	}
 }
 

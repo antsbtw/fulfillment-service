@@ -67,7 +67,7 @@ func main() {
 	)
 
 	// Initialize HTTP server
-	server := http.NewServer(cfg, provisionService, vpnService)
+	server := http.NewServer(cfg, pool, provisionService, vpnService)
 
 	// Start server in goroutine
 	go func() {
