@@ -340,11 +340,8 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 	}
 
 	// 2. Get subscription config from otun-manager
-	// Use the VPN user UUID (instance_id) as device_id for otun-manager lookup
-	if resource.InstanceID == nil || *resource.InstanceID == "" {
-		return nil, fmt.Errorf("VPN resource has no instance_id (vpn_user_uuid)")
-	}
-	deviceID := *resource.InstanceID
+	// Use auth UUID (userID) as device_id — otun-manager will match via external_id fallback
+	deviceID := userID
 	trafficGB := int(resource.TrafficLimit / (1024 * 1024 * 1024))
 	if trafficGB < 1 {
 		trafficGB = 100 // default
