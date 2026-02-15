@@ -271,6 +271,23 @@ func (h *Handler) GetMyVPNSubscribe(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// GetUserVPNSubscribe gets VPN subscription config for a user (internal API, called by user-portal)
+func (h *Handler) GetUserVPNSubscribe(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.GetUserVPNSubscribeConfig(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
 // UpdateVPNResource updates a VPN resource (extend/upgrade)
 func (h *Handler) UpdateVPNResource(c *gin.Context) {
 	resourceID := c.Param("id")
