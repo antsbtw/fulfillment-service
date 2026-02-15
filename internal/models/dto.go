@@ -260,6 +260,7 @@ type VPNUserInfo struct {
 
 // VPNSubscribeResponse is returned when getting VPN subscription config
 type VPNSubscribeResponse struct {
+	Status       string        `json:"status"`
 	SubscribeURL string        `json:"subscribe_url"`
 	DeviceID     string        `json:"device_id"`
 	Protocols    []VPNProtocol `json:"protocols,omitempty"`

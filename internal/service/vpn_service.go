@@ -369,6 +369,7 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 	}
 
 	return &models.VPNSubscribeResponse{
+		Status:       "active",
 		SubscribeURL: fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
 		DeviceID:     deviceID,
 		Protocols:    protocols,
