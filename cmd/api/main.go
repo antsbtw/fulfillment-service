@@ -46,7 +46,7 @@ func main() {
 		cfg.InternalSecret,
 	)
 
-	otunClient := client.NewOTunClient(cfg.Services.OTunManagerURL)
+	otunClient := client.NewOTunClient(cfg.Services.OTunManagerURL, cfg.InternalSecret)
 
 	// Initialize services
 	provisionService := service.NewProvisionService(

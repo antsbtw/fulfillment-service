@@ -13,14 +13,16 @@ import (
 
 // OTunClient calls otun-manager to manage VPN users
 type OTunClient struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL        string
+	internalSecret string
+	httpClient     *http.Client
 }
 
 // NewOTunClient creates a new OTun manager client
-func NewOTunClient(baseURL string) *OTunClient {
+func NewOTunClient(baseURL, internalSecret string) *OTunClient {
 	return &OTunClient{
-		baseURL: baseURL,
+		baseURL:        baseURL,
+		internalSecret: internalSecret,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -101,6 +103,13 @@ type Protocol struct {
 	Node     string `json:"node"`
 }
 
+// setAuthHeader 设置内部服务认证头
+func (c *OTunClient) setAuthHeader(req *http.Request) {
+	if c.internalSecret != "" {
+		req.Header.Set("X-Internal-Secret", c.internalSecret)
+	}
+}
+
 // CreateUser creates a new VPN user in otun-manager
 func (c *OTunClient) CreateUser(ctx context.Context, req *CreateVPNUserRequest) (*CreateVPNUserResponse, error) {
 	// 日志脱敏: 不记录 email 等 PII 信息
@@ -117,6 +126,7 @@ func (c *OTunClient) CreateUser(ctx context.Context, req *CreateVPNUserRequest) 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -152,6 +162,8 @@ func (c *OTunClient) GetUser(ctx context.Context, uuid string) (*VPNUserInfo, er
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -195,6 +207,7 @@ func (c *OTunClient) UpdateUser(ctx context.Context, uuid string, req *UpdateVPN
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -234,6 +247,8 @@ func (c *OTunClient) DeleteUser(ctx context.Context, uuid string) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 
+	c.setAuthHeader(httpReq)
+
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
@@ -264,6 +279,7 @@ func (c *OTunClient) GetSubscribeConfig(ctx context.Context, req *SubscribeReque
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -298,6 +314,8 @@ func (c *OTunClient) GetUserStats(ctx context.Context, uuid string) (*VPNUserInf
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+
+	c.setAuthHeader(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
