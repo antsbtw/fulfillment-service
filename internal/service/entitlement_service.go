@@ -129,6 +129,24 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 		return nil, fmt.Errorf("trial already used")
 	}
 
+	// 1.5. Check if email already used a trial (prevent abuse via delete & re-register)
+	if email != "" {
+		emailUsed, err := s.entitlementRepo.ExistsTrialByEmail(ctx, email)
+		if err != nil {
+			log.Printf("[EntitlementService] Warning: email check failed: %v", err)
+		} else if emailUsed {
+			return nil, fmt.Errorf("trial already used")
+		}
+	}
+
+	// 1.6. Check if device already used a trial (prevent abuse via new account on same device)
+	deviceUsed, err := s.entitlementRepo.ExistsTrialByDeviceID(ctx, deviceID)
+	if err != nil {
+		log.Printf("[EntitlementService] Warning: device_id check failed: %v", err)
+	} else if deviceUsed {
+		return nil, fmt.Errorf("trial already used")
+	}
+
 	// 2. Check if user has active purchase -> 403 Already subscribed
 	activePurchase, err := s.entitlementRepo.GetActiveByUserIDAndSource(ctx, userID, models.EntitlementSourcePurchase)
 	if err == nil && activePurchase != nil {

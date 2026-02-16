@@ -103,6 +103,38 @@ func (r *EntitlementRepository) GetOtunUUIDByUserID(ctx context.Context, userID 
 	return otunUUID, nil
 }
 
+// ExistsTrialByDeviceID checks if a trial entitlement already exists for the given device_id
+func (r *EntitlementRepository) ExistsTrialByDeviceID(ctx context.Context, deviceID string) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM fulfillment.entitlements
+			WHERE device_id = $1 AND source = 'trial'
+		)
+	`
+	var exists bool
+	err := r.pool.QueryRow(ctx, query, deviceID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check trial by device_id: %w", err)
+	}
+	return exists, nil
+}
+
+// ExistsTrialByEmail checks if a trial entitlement already exists for the given email
+func (r *EntitlementRepository) ExistsTrialByEmail(ctx context.Context, email string) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM fulfillment.entitlements
+			WHERE email = $1 AND source = 'trial'
+		)
+	`
+	var exists bool
+	err := r.pool.QueryRow(ctx, query, email).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check trial by email: %w", err)
+	}
+	return exists, nil
+}
+
 // UpdateStatus updates the status of an entitlement
 func (r *EntitlementRepository) UpdateStatus(ctx context.Context, id, status string) error {
 	query := `UPDATE fulfillment.entitlements SET status = $1 WHERE id = $2`
