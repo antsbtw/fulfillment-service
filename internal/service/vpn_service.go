@@ -374,9 +374,36 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 		SubscribeURL: fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
 		DeviceID:     deviceID,
 		Protocols:    protocols,
+		TrafficLimit: resource.TrafficLimit,
+		TrafficUsed:  resource.TrafficUsed,
 		ExpireAt:     config.ExpireAt,
 		Message:      "VPN configuration retrieved successfully",
 	}, nil
+}
+
+// GetUserVPNQuickStatus returns lightweight VPN status (no protocols, for Sync Status button)
+func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (*models.VPNQuickStatus, error) {
+	resource, err := s.resourceRepo.GetActiveByUserAndType(ctx, userID, models.ResourceTypeVPNUser)
+	if err != nil || resource == nil {
+		return nil, fmt.Errorf("no active VPN subscription")
+	}
+
+	resp := &models.VPNQuickStatus{
+		Status:       resource.Status,
+		TrafficLimit: resource.TrafficLimit,
+		TrafficUsed:  resource.TrafficUsed,
+	}
+
+	// Get real-time traffic_used and expire_at from otun-manager
+	if resource.InstanceID != nil && *resource.InstanceID != "" {
+		syncResp, err := s.otunClient.SyncUser(ctx, *resource.InstanceID)
+		if err == nil && syncResp != nil {
+			resp.ExpireAt = syncResp.ExpireAt
+			resp.TrafficUsed = syncResp.TrafficUsed
+		}
+	}
+
+	return resp, nil
 }
 
 // Helper functions

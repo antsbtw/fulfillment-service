@@ -264,8 +264,18 @@ type VPNSubscribeResponse struct {
 	SubscribeURL string        `json:"subscribe_url"`
 	DeviceID     string        `json:"device_id"`
 	Protocols    []VPNProtocol `json:"protocols,omitempty"`
+	TrafficLimit int64         `json:"traffic_limit"`
+	TrafficUsed  int64         `json:"traffic_used"`
 	ExpireAt     string        `json:"expire_at,omitempty"`
 	Message      string        `json:"message,omitempty"`
+}
+
+// VPNQuickStatus is a lightweight status response without protocols
+type VPNQuickStatus struct {
+	Status       string `json:"status"`
+	TrafficLimit int64  `json:"traffic_limit"`
+	TrafficUsed  int64  `json:"traffic_used"`
+	ExpireAt     string `json:"expire_at,omitempty"`
 }
 
 // VPNProtocol represents a single VPN protocol configuration
