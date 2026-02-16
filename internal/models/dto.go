@@ -270,7 +270,7 @@ type VPNSubscribeResponse struct {
 
 // VPNProtocol represents a single VPN protocol configuration
 type VPNProtocol struct {
-	Protocol string `json:"protocol"` // vless, shadowsocks
+	Protocol string `json:"protocol_name"` // vless, shadowsocks
 	URL      string `json:"url"`
 	Node     string `json:"node"` // primary, backup
 }
