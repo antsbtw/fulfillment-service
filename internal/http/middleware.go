@@ -52,6 +52,11 @@ func JWTAuthMiddleware(secretKey string) gin.HandlerFunc {
 			c.Set("userID", sub)
 		}
 
+		// 提取 email（如果存在）
+		if email, ok := claims["email"].(string); ok {
+			c.Set("email", email)
+		}
+
 		c.Next()
 	}
 }

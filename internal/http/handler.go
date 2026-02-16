@@ -9,14 +9,16 @@ import (
 )
 
 type Handler struct {
-	provisionService *service.ProvisionService
-	vpnService       *service.VPNService
+	provisionService   *service.ProvisionService
+	vpnService         *service.VPNService
+	entitlementService *service.EntitlementService
 }
 
-func NewHandler(provisionService *service.ProvisionService, vpnService *service.VPNService) *Handler {
+func NewHandler(provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService) *Handler {
 	return &Handler{
-		provisionService: provisionService,
-		vpnService:       vpnService,
+		provisionService:   provisionService,
+		vpnService:         vpnService,
+		entitlementService: entitlementService,
 	}
 }
 
@@ -308,4 +310,103 @@ func (h *Handler) UpdateVPNResource(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "VPN user updated successfully"})
+}
+
+// ==================== Trial & Entitlement Handlers ====================
+
+// GetTrialConfig returns trial configuration (public, no auth)
+// GET /api/v1/public/trial/config
+func (h *Handler) GetTrialConfig(c *gin.Context) {
+	resp := h.entitlementService.GetTrialConfig()
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetTrialStatus checks trial status for the current user (JWT auth)
+// GET /api/v1/my/trial/status
+func (h *Handler) GetTrialStatus(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	resp, err := h.entitlementService.GetTrialStatus(c.Request.Context(), userID.(string))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// ActivateTrial activates a trial for the current user (JWT auth)
+// POST /api/v1/my/trial/activate
+func (h *Handler) ActivateTrial(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	var req models.ActivateTrialRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get email from JWT claims if available
+	email, _ := c.Get("email")
+	emailStr, _ := email.(string)
+
+	resp, err := h.entitlementService.ActivateTrial(c.Request.Context(), userID.(string), emailStr, req.DeviceID)
+	if err != nil {
+		// Distinguish error types
+		switch err.Error() {
+		case "trial already used":
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case "user already has an active subscription":
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		case "trial is not available":
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
+// GiftEntitlement creates a gift entitlement (admin/internal)
+// POST /api/internal/entitlements/gift
+func (h *Handler) GiftEntitlement(c *gin.Context) {
+	var req models.GiftEntitlementRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.entitlementService.GiftEntitlement(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
+// ListEntitlements queries entitlements (admin/internal)
+// GET /api/internal/entitlements
+func (h *Handler) ListEntitlements(c *gin.Context) {
+	userID := c.Query("user_id")
+	source := c.Query("source")
+	status := c.Query("status")
+
+	resp, err := h.entitlementService.ListEntitlements(c.Request.Context(), userID, source, status)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"entitlements": resp})
 }

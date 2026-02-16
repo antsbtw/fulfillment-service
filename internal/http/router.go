@@ -90,7 +90,10 @@ var userRateLimiter = NewRateLimiter(30, time.Minute)
 // 说明: 业务规则限制每用户只能有一个托管节点，5 次足够处理重试和重建场景
 var createRateLimiter = NewRateLimiter(5, time.Hour)
 
-func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.ProvisionService, vpnService *service.VPNService) *Server {
+// Trial 激活速率限制器: 每 IP 每小时最多 10 次（防止滥用）
+var trialRateLimiter = NewRateLimiter(10, time.Hour)
+
+func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService) *Server {
 	gin.SetMode(cfg.Server.Mode)
 	router := gin.New()
 
@@ -98,7 +101,7 @@ func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.P
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
 
-	handler := NewHandler(provisionService, vpnService)
+	handler := NewHandler(provisionService, vpnService, entitlementService)
 
 	s := &Server{
 		router:  router,
@@ -140,6 +143,10 @@ func (s *Server) setupRoutes() {
 
 		// VPN resource update (extend/upgrade)
 		internal.PUT("/resources/:id/vpn", s.handler.UpdateVPNResource)
+
+		// Entitlement management (admin)
+		internal.POST("/entitlements/gift", s.handler.GiftEntitlement)
+		internal.GET("/entitlements", s.handler.ListEntitlements)
 	}
 
 	// Node callback API - called by node-agent
@@ -165,6 +172,10 @@ func (s *Server) setupRoutes() {
 		user.GET("/my/vpn", s.handler.GetMyVPN)                    // 获取 VPN 状态
 		user.GET("/my/vpn/subscribe", s.handler.GetMyVPNSubscribe) // 获取 VPN 订阅配置
 
+		// Trial management (JWT auth)
+		user.GET("/my/trial/status", s.handler.GetTrialStatus)                                           // 查询试用状态
+		user.POST("/my/trial/activate", RateLimitMiddleware(trialRateLimiter), s.handler.ActivateTrial)  // 激活试用
+
 		// Regions
 		user.GET("/regions", s.handler.GetRegions)
 	}
@@ -173,6 +184,7 @@ func (s *Server) setupRoutes() {
 	public := s.router.Group("/api/v1/public")
 	{
 		public.GET("/regions", s.handler.GetRegions)
+		public.GET("/trial/config", s.handler.GetTrialConfig) // 试用配置（公开）
 	}
 
 	// Internal Admin API (供 user-portal 调用，需要 Internal Secret)

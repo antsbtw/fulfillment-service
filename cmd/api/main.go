@@ -34,6 +34,7 @@ func main() {
 	resourceRepo := repository.NewResourceRepository(pool)
 	regionRepo := repository.NewRegionRepository(pool)
 	logRepo := repository.NewLogRepository(pool)
+	entitlementRepo := repository.NewEntitlementRepository(pool)
 
 	// Initialize clients
 	hostingClient := client.NewHostingClient(
@@ -66,8 +67,14 @@ func main() {
 		subscriptionClient,
 	)
 
+	entitlementService := service.NewEntitlementService(
+		cfg,
+		entitlementRepo,
+		otunClient,
+	)
+
 	// Initialize HTTP server
-	server := http.NewServer(cfg, pool, provisionService, vpnService)
+	server := http.NewServer(cfg, pool, provisionService, vpnService, entitlementService)
 
 	// Start server in goroutine
 	go func() {

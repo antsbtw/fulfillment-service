@@ -24,6 +24,13 @@ type Config struct {
 	Encryption     EncryptionConfig
 	Services       ServicesConfig
 	InternalSecret string
+	Trial          TrialConfig
+}
+
+type TrialConfig struct {
+	Enabled       bool
+	DurationHours int
+	TrafficGB     int
 }
 
 type ServerConfig struct {
@@ -106,11 +113,16 @@ func Load() *Config {
 			OTunManagerURL:         getEnv("OTUN_MANAGER_URL", "http://localhost:8022"),
 		},
 		InternalSecret: getEnv("INTERNAL_SECRET", ""),
+		Trial: TrialConfig{
+			Enabled:       getEnv("TRIAL_ENABLED", "true") == "true",
+			DurationHours: getEnvInt("TRIAL_DURATION_HOURS", 1),
+			TrafficGB:     getEnvInt("TRIAL_TRAFFIC_GB", 1),
+		},
 	}
 
 	// 日志脱敏: 不记录敏感配置
-	log.Printf("[config] Fulfillment Service loaded: port=%s db=%s/%s.%s hosting=%s",
-		cfg.Server.Port, cfg.Database.Host, cfg.Database.DBName, cfg.Database.Schema, cfg.Hosting.ServiceURL)
+	log.Printf("[config] Fulfillment Service loaded: port=%s db=%s/%s.%s hosting=%s trial_enabled=%v",
+		cfg.Server.Port, cfg.Database.Host, cfg.Database.DBName, cfg.Database.Schema, cfg.Hosting.ServiceURL, cfg.Trial.Enabled)
 
 	return cfg
 }

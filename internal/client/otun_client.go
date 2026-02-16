@@ -309,6 +309,38 @@ func (c *OTunClient) GetSubscribeConfig(ctx context.Context, req *SubscribeReque
 	return &result, nil
 }
 
+// SyncUser gets VPN user sync info including protocols (GET /api/users/:uuid/sync)
+func (c *OTunClient) SyncUser(ctx context.Context, uuid string) (*SubscribeResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/users/"+uuid+"/sync", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("otun-manager sync returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result SubscribeResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+	}
+
+	return &result, nil
+}
+
 // GetUserStats gets VPN user traffic statistics
 func (c *OTunClient) GetUserStats(ctx context.Context, uuid string) (*VPNUserInfo, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/users/"+uuid+"/stats", nil)
