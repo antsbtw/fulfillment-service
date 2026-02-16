@@ -75,7 +75,8 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	otunReq := &client.CreateVPNUserRequest{
 		UUID:         vpnUserID,
 		Email:        req.UserEmail,
-		ExternalID:   req.UserID, // Platform user ID as external ID
+		ExternalID:   "",          // 留空，后续由支付 webhook 填入 apple_xxx
+		AuthUserID:   req.UserID,  // auth UUID 存入专用字段
 		Protocols:    []string{"vless", "shadowsocks"},
 		SSPassword:   ssPassword,
 		TrafficLimit: trafficLimit,

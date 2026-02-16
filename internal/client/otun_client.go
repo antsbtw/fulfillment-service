@@ -34,6 +34,7 @@ type CreateVPNUserRequest struct {
 	UUID         string   `json:"uuid"`
 	Email        string   `json:"email,omitempty"`
 	ExternalID   string   `json:"external_id,omitempty"`
+	AuthUserID   string   `json:"auth_user_id,omitempty"`
 	Protocols    []string `json:"protocols"`
 	SSPassword   string   `json:"ss_password"`
 	TrafficLimit int64    `json:"traffic_limit"`
