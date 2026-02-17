@@ -31,9 +31,11 @@ func NewHostingClient(baseURL, adminKey string) *HostingClient {
 
 // CreateNodeRequest is the request to create a node
 type CreateNodeRequest struct {
-	CloudProvider string `json:"cloud_provider,omitempty"` // aws, digitalocean
-	Region        string `json:"region,omitempty"`
-	BundleID      string `json:"bundle_id,omitempty"` // nano_3_0, small_3_0, etc.
+	CloudProvider  string `json:"cloud_provider,omitempty"`  // aws, digitalocean
+	Region         string `json:"region,omitempty"`
+	BundleID       string `json:"bundle_id,omitempty"`       // nano_3_0, small_3_0, etc.
+	SubscriptionID string `json:"subscription_id,omitempty"` // 对账单 ID（hosting-service 要求 fulfillment 必填）
+	UserID         string `json:"user_id,omitempty"`         // 用户 ID（hosting-service 要求 fulfillment 必填）
 }
 
 // CreateNodeResponse is the response from creating a node

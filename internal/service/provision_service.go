@@ -109,9 +109,11 @@ func (s *ProvisionService) provisionAsync(resourceID string, req *models.Provisi
 
 	// Call obox-hosting-service to create node
 	createReq := &client.CreateNodeRequest{
-		CloudProvider: s.cfg.Hosting.CloudProvider,
-		Region:        region,
-		BundleID:      bundleID,
+		CloudProvider:  s.cfg.Hosting.CloudProvider,
+		Region:         region,
+		BundleID:       bundleID,
+		SubscriptionID: req.SubscriptionID,
+		UserID:         req.UserID,
 	}
 
 	createResp, err := s.hostingClient.CreateNode(ctx, createReq)
