@@ -118,6 +118,12 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		return nil, fmt.Errorf("failed to create VPN user in otun-manager: %w", err)
 	}
 
+	// otun-manager 可能因 auth_user_id 去重返回已有用户，使用实际返回的 UUID
+	actualVPNUserID := otunResp.UUID
+	if actualVPNUserID == "" {
+		actualVPNUserID = vpnUserID
+	}
+
 	// 5. Create local resource record
 	resourceID := uuid.New().String()
 	now := time.Now()
@@ -132,14 +138,14 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		PlanTier:       req.PlanTier,
 		TrafficLimit:   trafficLimit,
 		TrafficUsed:    0,
-		InstanceID:     &vpnUserID,  // otun-manager user UUID
-		APIKey:         &ssPassword, // SS password
+		InstanceID:     &actualVPNUserID, // otun-manager 返回的实际 UUID
+		APIKey:         &ssPassword,      // SS password
 		ReadyAt:        &now,
 	}
 
 	if err := s.resourceRepo.Create(ctx, resource); err != nil {
 		// Rollback: delete user in otun-manager
-		_ = s.otunClient.DeleteUser(ctx, vpnUserID)
+		_ = s.otunClient.DeleteUser(ctx, actualVPNUserID)
 		return nil, fmt.Errorf("failed to save resource: %w", err)
 	}
 
@@ -147,21 +153,21 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	s.logRepo.LogActionWithMetadata(ctx, resourceID, "vpn_user_created", "active",
 		"VPN user created successfully",
 		map[string]interface{}{
-			"vpn_user_id":   vpnUserID,
+			"vpn_user_id":   actualVPNUserID,
 			"plan_tier":     req.PlanTier,
 			"traffic_limit": trafficLimit,
 			"expire_at":     expireAt.Format(time.RFC3339),
 		})
 
 	// 7. Notify subscription-service
-	s.notifyVPNActive(ctx, req.SubscriptionID, resourceID, vpnUserID)
+	s.notifyVPNActive(ctx, req.SubscriptionID, resourceID, actualVPNUserID)
 
-	log.Printf("[VPNService] VPN user created successfully: resource=%s, vpn_user=%s", resourceID, otunResp.UUID)
+	log.Printf("[VPNService] VPN user created successfully: resource=%s, vpn_user=%s", resourceID, actualVPNUserID)
 
 	return &models.ProvisionResponse{
 		ResourceID: resourceID,
 		Status:     models.StatusActive,
-		VPNUserID:  vpnUserID,
+		VPNUserID:  actualVPNUserID,
 		Message:    "VPN user created successfully",
 	}, nil
 }
