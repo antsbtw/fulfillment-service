@@ -65,7 +65,9 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 
 	// 2. Calculate traffic limit and expire time
 	trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
+	log.Printf("[VPNService] ProvisionVPNUser: req.ExpireDays=%d, req.TrafficLimit=%d", req.ExpireDays, req.TrafficLimit)
 	expireAt := s.calculateExpireAt(req.ExpireDays)
+	log.Printf("[VPNService] Calculated expireAt=%s", expireAt.Format(time.RFC3339))
 
 	// 3. Generate VPN user credentials
 	vpnUserID := uuid.New().String()
