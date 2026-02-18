@@ -50,16 +50,40 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	// 1. Check if user already has an active VPN resource
 	existing, err := s.resourceRepo.GetActiveByUserAndType(ctx, req.UserID, models.ResourceTypeVPNUser)
 	if err == nil && existing != nil {
-		// Already exists, return existing resource
+		// 用户已存在，更新 expire_at 和 traffic_limit（续购场景）
 		vpnUserID := ""
 		if existing.InstanceID != nil {
 			vpnUserID = *existing.InstanceID
 		}
+
+		if vpnUserID != "" && req.ExpireDays > 0 {
+			trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
+			expireAt := s.calculateExpireAt(req.ExpireDays)
+			enabled := true
+
+			updateReq := &client.UpdateVPNUserRequest{
+				TrafficLimit: trafficLimit,
+				ExpireAt:     expireAt.Format(time.RFC3339),
+				Enabled:      &enabled,
+			}
+
+			if err := s.otunClient.UpdateUser(ctx, vpnUserID, updateReq); err != nil {
+				log.Printf("[VPNService] Warning: failed to update existing VPN user: %v", err)
+			} else {
+				log.Printf("[VPNService] Updated existing VPN user %s: expire=%s, traffic=%d",
+					vpnUserID, expireAt.Format(time.RFC3339), trafficLimit)
+			}
+
+			// 更新本地 resource 记录
+			existing.TrafficLimit = trafficLimit
+			s.resourceRepo.Update(ctx, existing)
+		}
+
 		return &models.ProvisionResponse{
 			ResourceID: existing.ID,
 			Status:     existing.Status,
 			VPNUserID:  vpnUserID,
-			Message:    "VPN user already exists",
+			Message:    "VPN user updated (renewal)",
 		}, nil
 	}
 
