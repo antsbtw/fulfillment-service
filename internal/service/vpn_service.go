@@ -343,17 +343,11 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 	}
 
 	// 2. Get subscription config from otun-manager
-	// Use auth UUID (userID) as device_id — otun-manager will match via external_id fallback
+	// Use auth UUID (userID) as device_id — otun-manager will match via auth_user_id fallback
 	deviceID := userID
-	trafficGB := int(resource.TrafficLimit / (1024 * 1024 * 1024))
-	if trafficGB < 1 {
-		trafficGB = 100 // default
-	}
 
 	subscribeReq := &client.SubscribeRequest{
-		DeviceID:  deviceID,
-		TrafficGB: trafficGB,
-		DaysValid: 30,
+		DeviceID: deviceID,
 	}
 
 	config, err := s.otunClient.GetSubscribeConfig(ctx, subscribeReq)
