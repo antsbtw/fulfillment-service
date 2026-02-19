@@ -231,7 +231,7 @@ func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason
 
 	// Notify subscription-service
 	if vp.SubscriptionID != "" {
-		if err := s.subscriptionClient.NotifyDeleted(ctx, vp.SubscriptionID, vp.ID); err != nil {
+		if err := s.subscriptionClient.NotifyVPNDeleted(ctx, vp.SubscriptionID, vp.ID); err != nil {
 			log.Printf("[VPNService] Failed to notify subscription-service (deleted): %v", err)
 		}
 	}
@@ -552,8 +552,9 @@ func (s *VPNService) notifyVPNActive(ctx context.Context, subscriptionID, resour
 	}
 	callback := &models.SubscriptionCallback{
 		SubscriptionID: subscriptionID,
-		ResourceID:     resourceID,
+		App:            "otun",
 		Status:         models.StatusActive,
+		Message:        fmt.Sprintf("VPN resource %s is active", resourceID),
 	}
 	if err := s.subscriptionClient.NotifyResourceStatus(ctx, callback); err != nil {
 		log.Printf("[VPNService] Failed to notify subscription-service (active): %v", err)

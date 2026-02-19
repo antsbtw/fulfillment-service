@@ -7,6 +7,7 @@ type ProvisionRequest struct {
 	// Three-level classification (new fields, preferred)
 	AppSource    string `json:"app_source"`    // otun / obox
 	BusinessType string `json:"business_type"` // purchase / subscription / trial / gift
+	Channel      string `json:"channel"`       // apple, google, stripe, credit
 
 	// Association
 	SubscriptionID string `json:"subscription_id"`
@@ -19,7 +20,10 @@ type ProvisionRequest struct {
 	Region       string `json:"region"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	ExpireDays   int    `json:"expire_days"`
-	Channel      string `json:"channel"` // apple, google, stripe, credit
+
+	// v3.1 新增
+	ProductID    string `json:"product_id,omitempty"`
+	PurchaseType string `json:"purchase_type,omitempty"` // subscription, one_time
 
 	// Trial-specific
 	DeviceID string `json:"device_id,omitempty"`
@@ -212,19 +216,13 @@ type NodeFailedCallback struct {
 
 // ==================== Subscription Service Callback ====================
 
-// SubscriptionCallback is sent to subscription-service on status changes
+// SubscriptionCallback is sent to subscription-service on status changes (v3.1 简化版)
 type SubscriptionCallback struct {
-	SubscriptionID string  `json:"subscription_id"`
-	ResourceID     string  `json:"resource_id"`
-	Status         string  `json:"status"`      // provisioning, installing, active, failed, deleted
-	PublicIP       *string `json:"public_ip,omitempty"`
-	APIPort        int     `json:"api_port,omitempty"`
-	APIKey         *string `json:"api_key,omitempty"`
-	VlessPort      int     `json:"vless_port,omitempty"`
-	SSPort         int     `json:"ss_port,omitempty"`
-	PublicKey      *string `json:"public_key,omitempty"`
-	ShortID        *string `json:"short_id,omitempty"`
-	ErrorMessage   *string `json:"error_message,omitempty"`
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+	App            string `json:"app" binding:"required"` // otun, obox
+	Status         string `json:"status" binding:"required"` // active, failed, deleted
+	Error          string `json:"error,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 // ==================== VPN User DTOs ====================

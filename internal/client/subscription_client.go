@@ -29,7 +29,7 @@ func NewSubscriptionClient(baseURL, internalKey string) *SubscriptionClient {
 	}
 }
 
-// NotifyResourceStatus sends resource status callback to subscription-service
+// NotifyResourceStatus sends resource status callback to subscription-service (v3.1 简化版)
 func (c *SubscriptionClient) NotifyResourceStatus(ctx context.Context, callback *models.SubscriptionCallback) error {
 	url := fmt.Sprintf("%s/api/internal/fulfillment/callback", c.baseURL)
 
@@ -59,62 +59,79 @@ func (c *SubscriptionClient) NotifyResourceStatus(ctx context.Context, callback 
 	return nil
 }
 
-// NotifyProvisioningStarted notifies that provisioning has started
+// NotifyProvisioningStarted notifies that provisioning has started (no-op in v3.1, subscription-service no longer tracks intermediate states)
 func (c *SubscriptionClient) NotifyProvisioningStarted(ctx context.Context, subscriptionID, resourceID string) error {
-	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
-		SubscriptionID: subscriptionID,
-		ResourceID:     resourceID,
-		Status:         models.StatusCreating,
-	})
+	// v3.1: subscription-service 不再跟踪中间状态 (creating/installing)，只关心最终状态 (active/failed/deleted)
+	// 保留方法签名以避免破坏调用方，但不发送回调
+	return nil
 }
 
-// NotifyInstalling notifies that software installation has started
+// NotifyInstalling notifies that software installation has started (no-op in v3.1)
 func (c *SubscriptionClient) NotifyInstalling(ctx context.Context, subscriptionID, resourceID, publicIP string) error {
-	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
-		SubscriptionID: subscriptionID,
-		ResourceID:     resourceID,
-		Status:         models.StatusInstalling,
-		PublicIP:       &publicIP,
-	})
+	// v3.1: subscription-service 不再跟踪中间状态
+	return nil
 }
 
 // NotifyActive notifies that resource is active and ready
 func (c *SubscriptionClient) NotifyActive(ctx context.Context, subscriptionID, resourceID string, info *models.NodeReadyCallback) error {
-	publicIP := info.PublicIP
-	apiKey := info.APIKey
-	publicKey := info.PublicKey
-	shortID := info.ShortID
-
+	// Hosting (obox) 资源就绪
 	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
 		SubscriptionID: subscriptionID,
-		ResourceID:     resourceID,
+		App:            "obox",
 		Status:         models.StatusActive,
-		PublicIP:       &publicIP,
-		APIPort:        info.APIPort,
-		APIKey:         &apiKey,
-		VlessPort:      info.VlessPort,
-		SSPort:         info.SSPort,
-		PublicKey:      &publicKey,
-		ShortID:        &shortID,
+		Message:        fmt.Sprintf("Resource %s is active", resourceID),
 	})
 }
 
 // NotifyFailed notifies that provisioning has failed
 func (c *SubscriptionClient) NotifyFailed(ctx context.Context, subscriptionID, resourceID, errorMsg string) error {
+	// Hosting (obox) 开通失败
 	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
 		SubscriptionID: subscriptionID,
-		ResourceID:     resourceID,
+		App:            "obox",
 		Status:         models.StatusFailed,
-		ErrorMessage:   &errorMsg,
+		Error:          errorMsg,
 	})
 }
 
 // NotifyDeleted notifies that resource has been deleted
 func (c *SubscriptionClient) NotifyDeleted(ctx context.Context, subscriptionID, resourceID string) error {
+	// Hosting (obox) 资源删除
 	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
 		SubscriptionID: subscriptionID,
-		ResourceID:     resourceID,
+		App:            "obox",
 		Status:         models.StatusDeleted,
+		Message:        fmt.Sprintf("Resource %s deleted", resourceID),
+	})
+}
+
+// NotifyVPNActive notifies that VPN user is active
+func (c *SubscriptionClient) NotifyVPNActive(ctx context.Context, subscriptionID, resourceID string) error {
+	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
+		SubscriptionID: subscriptionID,
+		App:            "otun",
+		Status:         models.StatusActive,
+		Message:        fmt.Sprintf("VPN resource %s is active", resourceID),
+	})
+}
+
+// NotifyVPNFailed notifies that VPN provisioning failed
+func (c *SubscriptionClient) NotifyVPNFailed(ctx context.Context, subscriptionID, resourceID, errorMsg string) error {
+	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
+		SubscriptionID: subscriptionID,
+		App:            "otun",
+		Status:         models.StatusFailed,
+		Error:          errorMsg,
+	})
+}
+
+// NotifyVPNDeleted notifies that VPN resource has been deleted
+func (c *SubscriptionClient) NotifyVPNDeleted(ctx context.Context, subscriptionID, resourceID string) error {
+	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
+		SubscriptionID: subscriptionID,
+		App:            "otun",
+		Status:         models.StatusDeleted,
+		Message:        fmt.Sprintf("VPN resource %s deleted", resourceID),
 	})
 }
 
