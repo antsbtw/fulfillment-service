@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// Resource status constants
+// Resource status constants (shared by hosting and vpn provisions)
 const (
 	StatusPending    = "pending"
 	StatusCreating   = "creating"
@@ -17,7 +17,7 @@ const (
 	StatusFailed     = "failed"
 )
 
-// Resource type constants
+// Resource type constants (legacy, used by adaptLegacyRequest)
 const (
 	ResourceTypeHostingNode = "hosting_node"
 	ResourceTypeOTunNode    = "otun_node"
@@ -26,48 +26,9 @@ const (
 
 // Cloud provider constants
 const (
-	ProviderLightsail   = "lightsail"
+	ProviderLightsail    = "lightsail"
 	ProviderDigitalOcean = "digitalocean"
 )
-
-// Resource represents a provisioned cloud resource
-type Resource struct {
-	ID             string
-	SubscriptionID string
-	UserID         string
-
-	ResourceType string
-	Provider     string
-	Region       string
-	InstanceID   *string
-
-	PublicIP  *string
-	PrivateIP *string
-
-	// Node configuration
-	APIPort   int
-	APIKey    *string
-	VlessPort int
-	SSPort    int
-	PublicKey *string
-	ShortID   *string
-
-	// SSH credentials
-	SSHPrivateKey *string
-	SSHKeyName    *string
-
-	Status       string
-	ErrorMessage *string
-
-	PlanTier     string
-	TrafficLimit int64
-	TrafficUsed  int64
-
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	ReadyAt   *time.Time
-	DeletedAt *time.Time
-}
 
 // Region represents an available cloud region
 type Region struct {
@@ -79,13 +40,14 @@ type Region struct {
 	UpdatedAt time.Time
 }
 
-// ResourceLog represents an operation log entry
-type ResourceLog struct {
-	ID         string
-	ResourceID string
-	Action     string
-	Status     string
-	Message    string
-	Metadata   map[string]interface{}
-	CreatedAt  time.Time
+// ProvisionLog represents an operation log entry
+type ProvisionLog struct {
+	ID            string
+	ProvisionID   string
+	ProvisionType string // "hosting" or "vpn"
+	Action        string
+	Status        string
+	Message       string
+	Metadata      map[string]interface{}
+	CreatedAt     time.Time
 }

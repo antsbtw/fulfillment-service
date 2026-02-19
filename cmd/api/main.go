@@ -31,10 +31,10 @@ func main() {
 	defer pool.Close()
 
 	// Initialize repositories
-	resourceRepo := repository.NewResourceRepository(pool)
+	hostingRepo := repository.NewHostingProvisionRepository(pool)
+	vpnRepo := repository.NewVPNProvisionRepository(pool)
 	regionRepo := repository.NewRegionRepository(pool)
 	logRepo := repository.NewLogRepository(pool)
-	entitlementRepo := repository.NewEntitlementRepository(pool)
 
 	// Initialize clients
 	hostingClient := client.NewHostingClient(
@@ -52,7 +52,7 @@ func main() {
 	// Initialize services
 	provisionService := service.NewProvisionService(
 		cfg,
-		resourceRepo,
+		hostingRepo,
 		regionRepo,
 		logRepo,
 		hostingClient,
@@ -61,7 +61,7 @@ func main() {
 
 	vpnService := service.NewVPNService(
 		cfg,
-		resourceRepo,
+		vpnRepo,
 		logRepo,
 		otunClient,
 		subscriptionClient,
@@ -69,7 +69,7 @@ func main() {
 
 	entitlementService := service.NewEntitlementService(
 		cfg,
-		entitlementRepo,
+		vpnRepo,
 		otunClient,
 	)
 

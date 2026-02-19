@@ -35,11 +35,12 @@ func (h *Handler) Provision(c *gin.Context) {
 	var resp *models.ProvisionResponse
 	var err error
 
-	// Route to appropriate service based on resource type
-	switch req.ResourceType {
-	case models.ResourceTypeVPNUser:
+	// Route based on app_source (new) or resource_type (legacy)
+	switch {
+	case req.AppSource == "otun" || req.ResourceType == models.ResourceTypeVPNUser:
 		resp, err = h.vpnService.ProvisionVPNUser(c.Request.Context(), &req)
 	default:
+		// obox or hosting_node
 		resp, err = h.provisionService.Provision(c.Request.Context(), &req)
 	}
 
@@ -110,7 +111,7 @@ func (h *Handler) GetUserResources(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.provisionService.GetUserNodeStatus(c.Request.Context(), userID, models.ResourceTypeHostingNode)
+	resp, err := h.provisionService.GetUserNodeStatus(c.Request.Context(), userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -163,9 +164,7 @@ func (h *Handler) GetMyNode(c *gin.Context) {
 		return
 	}
 
-	resourceType := c.DefaultQuery("type", models.ResourceTypeHostingNode)
-
-	resp, err := h.provisionService.GetUserNodeStatus(c.Request.Context(), userID.(string), resourceType)
+	resp, err := h.provisionService.GetUserNodeStatus(c.Request.Context(), userID.(string))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -175,7 +174,6 @@ func (h *Handler) GetMyNode(c *gin.Context) {
 }
 
 // CreateMyNode creates a new node for the current user
-// POST /api/v1/my/node
 func (h *Handler) CreateMyNode(c *gin.Context) {
 	userID, exists := c.Get("userID")
 	if !exists {
@@ -204,7 +202,6 @@ func (h *Handler) CreateMyNode(c *gin.Context) {
 }
 
 // DeleteMyNode deletes the current user's node
-// DELETE /api/v1/my/node
 func (h *Handler) DeleteMyNode(c *gin.Context) {
 	userID, exists := c.Get("userID")
 	if !exists {
@@ -332,14 +329,12 @@ func (h *Handler) UpdateVPNResource(c *gin.Context) {
 // ==================== Trial & Entitlement Handlers ====================
 
 // GetTrialConfig returns trial configuration (public, no auth)
-// GET /api/v1/public/trial/config
 func (h *Handler) GetTrialConfig(c *gin.Context) {
 	resp := h.entitlementService.GetTrialConfig()
 	c.JSON(http.StatusOK, resp)
 }
 
 // GetTrialStatus checks trial status for the current user (JWT auth)
-// GET /api/v1/my/trial/status
 func (h *Handler) GetTrialStatus(c *gin.Context) {
 	userID, exists := c.Get("userID")
 	if !exists {
@@ -357,7 +352,6 @@ func (h *Handler) GetTrialStatus(c *gin.Context) {
 }
 
 // ActivateTrial activates a trial for the current user (JWT auth)
-// POST /api/v1/my/trial/activate
 func (h *Handler) ActivateTrial(c *gin.Context) {
 	userID, exists := c.Get("userID")
 	if !exists {
@@ -371,13 +365,11 @@ func (h *Handler) ActivateTrial(c *gin.Context) {
 		return
 	}
 
-	// Get email from JWT claims if available
 	email, _ := c.Get("email")
 	emailStr, _ := email.(string)
 
 	resp, err := h.entitlementService.ActivateTrial(c.Request.Context(), userID.(string), emailStr, req.DeviceID)
 	if err != nil {
-		// Distinguish error types
 		switch err.Error() {
 		case "trial already used":
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -395,7 +387,6 @@ func (h *Handler) ActivateTrial(c *gin.Context) {
 }
 
 // GiftEntitlement creates a gift entitlement (admin/internal)
-// POST /api/internal/entitlements/gift
 func (h *Handler) GiftEntitlement(c *gin.Context) {
 	var req models.GiftEntitlementRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -413,13 +404,16 @@ func (h *Handler) GiftEntitlement(c *gin.Context) {
 }
 
 // ListEntitlements queries entitlements (admin/internal)
-// GET /api/internal/entitlements
 func (h *Handler) ListEntitlements(c *gin.Context) {
 	userID := c.Query("user_id")
-	source := c.Query("source")
+	businessType := c.Query("business_type")
+	// Keep backward-compatible: also accept "source" query param
+	if businessType == "" {
+		businessType = c.Query("source")
+	}
 	status := c.Query("status")
 
-	resp, err := h.entitlementService.ListEntitlements(c.Request.Context(), userID, source, status)
+	resp, err := h.entitlementService.ListEntitlements(c.Request.Context(), userID, businessType, status)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

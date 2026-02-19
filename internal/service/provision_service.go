@@ -13,10 +13,10 @@ import (
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/repository"
 )
 
-// ProvisionService handles resource provisioning operations
+// ProvisionService handles hosting node provisioning operations
 type ProvisionService struct {
 	cfg                *config.Config
-	resourceRepo       *repository.ResourceRepository
+	hostingRepo        *repository.HostingProvisionRepository
 	regionRepo         *repository.RegionRepository
 	logRepo            *repository.LogRepository
 	hostingClient      *client.HostingClient
@@ -26,7 +26,7 @@ type ProvisionService struct {
 // NewProvisionService creates a new provision service
 func NewProvisionService(
 	cfg *config.Config,
-	resourceRepo *repository.ResourceRepository,
+	hostingRepo *repository.HostingProvisionRepository,
 	regionRepo *repository.RegionRepository,
 	logRepo *repository.LogRepository,
 	hostingClient *client.HostingClient,
@@ -34,7 +34,7 @@ func NewProvisionService(
 ) *ProvisionService {
 	return &ProvisionService{
 		cfg:                cfg,
-		resourceRepo:       resourceRepo,
+		hostingRepo:        hostingRepo,
 		regionRepo:         regionRepo,
 		logRepo:            logRepo,
 		hostingClient:      hostingClient,
@@ -42,10 +42,10 @@ func NewProvisionService(
 	}
 }
 
-// Provision starts the provisioning process for a new resource
+// Provision starts the provisioning process for a new hosting node
 func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
-	log.Printf("[Provision] Starting provisioning for subscription=%s, user=%s, type=%s",
-		req.SubscriptionID, req.UserID, req.ResourceType)
+	log.Printf("[Provision] Starting provisioning for subscription=%s, user=%s",
+		req.SubscriptionID, req.UserID)
 
 	// Validate region if specified
 	region := req.Region
@@ -53,19 +53,19 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		region = s.cfg.Hosting.DefaultRegion
 	}
 
-	// Check if user already has an active resource of this type
-	existing, err := s.resourceRepo.GetActiveByUserAndType(ctx, req.UserID, req.ResourceType)
+	// Check if user already has an active hosting node
+	existing, err := s.hostingRepo.GetActiveByUser(ctx, req.UserID)
 	if err == nil && existing != nil {
-		return nil, fmt.Errorf("user already has an active %s resource", req.ResourceType)
+		return nil, fmt.Errorf("user already has an active hosting_node resource")
 	}
 
-	// Create resource record
-	resourceID := uuid.New().String()
-	resource := &models.Resource{
-		ID:             resourceID,
+	// Create hosting provision record
+	provisionID := uuid.New().String()
+	hp := &models.HostingProvision{
+		ID:             provisionID,
 		SubscriptionID: req.SubscriptionID,
 		UserID:         req.UserID,
-		ResourceType:   req.ResourceType,
+		Channel:        req.Channel,
 		Provider:       s.cfg.Hosting.CloudProvider,
 		Region:         region,
 		Status:         models.StatusPending,
@@ -73,36 +73,36 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		TrafficLimit:   req.TrafficLimit,
 	}
 
-	if err := s.resourceRepo.Create(ctx, resource); err != nil {
-		return nil, fmt.Errorf("create resource record: %w", err)
+	if err := s.hostingRepo.Create(ctx, hp); err != nil {
+		return nil, fmt.Errorf("create hosting provision: %w", err)
 	}
 
 	// Log action
-	s.logRepo.LogAction(ctx, resourceID, "provision_started", "pending",
-		fmt.Sprintf("Provisioning started for %s in region %s", req.ResourceType, region))
+	s.logRepo.LogAction(ctx, provisionID, "hosting", "provision_started", "pending",
+		fmt.Sprintf("Provisioning started for hosting_node in region %s", region))
 
 	// Start async provisioning
-	go s.provisionAsync(resourceID, req, region)
+	go s.provisionAsync(provisionID, req, region)
 
 	return &models.ProvisionResponse{
-		ResourceID:            resourceID,
+		ResourceID:            provisionID,
 		Status:                models.StatusPending,
-		EstimatedReadySeconds: 300, // 5 minutes for VPS creation + installation
+		EstimatedReadySeconds: 300,
 		Message:               "Provisioning started",
 	}, nil
 }
 
 // provisionAsync handles the actual provisioning in the background
-func (s *ProvisionService) provisionAsync(resourceID string, req *models.ProvisionRequest, region string) {
+func (s *ProvisionService) provisionAsync(provisionID string, req *models.ProvisionRequest, region string) {
 	ctx := context.Background()
 
 	// Notify subscription-service that provisioning started
-	if err := s.subscriptionClient.NotifyProvisioningStarted(ctx, req.SubscriptionID, resourceID); err != nil {
+	if err := s.subscriptionClient.NotifyProvisioningStarted(ctx, req.SubscriptionID, provisionID); err != nil {
 		log.Printf("[Provision] Failed to notify subscription-service (start): %v", err)
 	}
 
 	// Update status to creating
-	s.updateStatus(ctx, resourceID, models.StatusCreating, nil)
+	s.updateStatus(ctx, provisionID, models.StatusCreating, nil)
 
 	// Get bundle ID based on plan tier
 	bundleID := s.getBundleID(req.PlanTier)
@@ -118,56 +118,56 @@ func (s *ProvisionService) provisionAsync(resourceID string, req *models.Provisi
 
 	createResp, err := s.hostingClient.CreateNode(ctx, createReq)
 	if err != nil {
-		s.handleProvisionError(ctx, req.SubscriptionID, resourceID, fmt.Sprintf("create node via hosting-service: %v", err))
+		s.handleProvisionError(ctx, req.SubscriptionID, provisionID, fmt.Sprintf("create node via hosting-service: %v", err))
 		return
 	}
 
 	// Store the external node ID
 	nodeID := createResp.NodeID
-	resource, _ := s.resourceRepo.GetByID(ctx, resourceID)
-	if resource != nil {
-		resource.InstanceID = &nodeID
-		resource.Status = models.StatusCreating
-		s.resourceRepo.Update(ctx, resource)
+	hp, _ := s.hostingRepo.GetByID(ctx, provisionID)
+	if hp != nil {
+		hp.HostingNodeID = nodeID
+		hp.Status = models.StatusCreating
+		s.hostingRepo.Update(ctx, hp)
 	}
 
-	s.logRepo.LogAction(ctx, resourceID, "node_creating", "creating",
+	s.logRepo.LogAction(ctx, provisionID, "hosting", "node_creating", "creating",
 		fmt.Sprintf("Node %s created in hosting-service, waiting for active state", nodeID))
 
-	// Wait for node to be active (obox-hosting-service handles VPS creation + installation)
+	// Wait for node to be active
 	node, err := s.hostingClient.WaitForNodeReady(ctx, nodeID, 10*time.Minute)
 	if err != nil {
-		s.handleProvisionError(ctx, req.SubscriptionID, resourceID, fmt.Sprintf("wait for node ready: %v", err))
+		s.handleProvisionError(ctx, req.SubscriptionID, provisionID, fmt.Sprintf("wait for node ready: %v", err))
 		return
 	}
 
-	// Update resource with node information
-	resource, _ = s.resourceRepo.GetByID(ctx, resourceID)
-	if resource != nil {
+	// Update hosting provision with node information
+	hp, _ = s.hostingRepo.GetByID(ctx, provisionID)
+	if hp != nil {
 		publicIP := node.PublicIP
 		apiKey := node.NodeAPIKey
 		publicKey := node.PublicKey
 		shortID := node.ShortID
 		now := time.Now()
 
-		resource.PublicIP = &publicIP
-		resource.APIPort = s.cfg.Node.APIPort
-		resource.APIKey = &apiKey
-		resource.VlessPort = node.VLESSPort
-		resource.SSPort = node.SSPort
-		resource.PublicKey = &publicKey
-		resource.ShortID = &shortID
-		resource.Status = models.StatusActive
-		resource.ReadyAt = &now
-		s.resourceRepo.Update(ctx, resource)
+		hp.PublicIP = &publicIP
+		hp.APIPort = s.cfg.Node.APIPort
+		hp.APIKey = &apiKey
+		hp.VlessPort = node.VLESSPort
+		hp.SSPort = node.SSPort
+		hp.PublicKey = &publicKey
+		hp.ShortID = &shortID
+		hp.Status = models.StatusActive
+		hp.ReadyAt = &now
+		s.hostingRepo.Update(ctx, hp)
 	}
 
-	s.logRepo.LogAction(ctx, resourceID, "node_ready", "active",
+	s.logRepo.LogAction(ctx, provisionID, "hosting", "node_ready", "active",
 		fmt.Sprintf("Node active at %s", node.PublicIP))
 
 	// Notify subscription-service that node is active
 	callback := &models.NodeReadyCallback{
-		ResourceID: resourceID,
+		ResourceID: provisionID,
 		PublicIP:   node.PublicIP,
 		APIPort:    s.cfg.Node.APIPort,
 		APIKey:     node.NodeAPIKey,
@@ -176,48 +176,47 @@ func (s *ProvisionService) provisionAsync(resourceID string, req *models.Provisi
 		PublicKey:  node.PublicKey,
 		ShortID:    node.ShortID,
 	}
-	if err := s.subscriptionClient.NotifyActive(ctx, req.SubscriptionID, resourceID, callback); err != nil {
+	if err := s.subscriptionClient.NotifyActive(ctx, req.SubscriptionID, provisionID, callback); err != nil {
 		log.Printf("[Provision] Failed to notify subscription-service (active): %v", err)
 	}
 
-	log.Printf("[Provision] Resource %s provisioning complete! Node active at %s", resourceID, node.PublicIP)
+	log.Printf("[Provision] Resource %s provisioning complete! Node active at %s", provisionID, node.PublicIP)
 }
 
 // HandleNodeReady handles callback when node software is ready
 func (s *ProvisionService) HandleNodeReady(ctx context.Context, callback *models.NodeReadyCallback) error {
 	log.Printf("[Provision] Node ready callback for resource %s", callback.ResourceID)
 
-	resource, err := s.resourceRepo.GetByID(ctx, callback.ResourceID)
+	hp, err := s.hostingRepo.GetByID(ctx, callback.ResourceID)
 	if err != nil {
-		return fmt.Errorf("get resource: %w", err)
+		return fmt.Errorf("get hosting provision: %w", err)
 	}
 
-	// Update resource with node info
 	publicIP := callback.PublicIP
 	apiKey := callback.APIKey
 	publicKey := callback.PublicKey
 	shortID := callback.ShortID
 	now := time.Now()
 
-	resource.PublicIP = &publicIP
-	resource.APIPort = callback.APIPort
-	resource.APIKey = &apiKey
-	resource.VlessPort = callback.VlessPort
-	resource.SSPort = callback.SSPort
-	resource.PublicKey = &publicKey
-	resource.ShortID = &shortID
-	resource.Status = models.StatusActive
-	resource.ReadyAt = &now
+	hp.PublicIP = &publicIP
+	hp.APIPort = callback.APIPort
+	hp.APIKey = &apiKey
+	hp.VlessPort = callback.VlessPort
+	hp.SSPort = callback.SSPort
+	hp.PublicKey = &publicKey
+	hp.ShortID = &shortID
+	hp.Status = models.StatusActive
+	hp.ReadyAt = &now
 
-	if err := s.resourceRepo.Update(ctx, resource); err != nil {
-		return fmt.Errorf("update resource: %w", err)
+	if err := s.hostingRepo.Update(ctx, hp); err != nil {
+		return fmt.Errorf("update hosting provision: %w", err)
 	}
 
-	s.logRepo.LogAction(ctx, resource.ID, "node_ready", "active",
+	s.logRepo.LogAction(ctx, hp.ID, "hosting", "node_ready", "active",
 		fmt.Sprintf("Node software installed, resource is active at %s", publicIP))
 
 	// Notify subscription-service
-	if err := s.subscriptionClient.NotifyActive(ctx, resource.SubscriptionID, resource.ID, callback); err != nil {
+	if err := s.subscriptionClient.NotifyActive(ctx, hp.SubscriptionID, hp.ID, callback); err != nil {
 		log.Printf("[Provision] Failed to notify subscription-service (active): %v", err)
 	}
 
@@ -228,12 +227,12 @@ func (s *ProvisionService) HandleNodeReady(ctx context.Context, callback *models
 func (s *ProvisionService) HandleNodeFailed(ctx context.Context, callback *models.NodeFailedCallback) error {
 	log.Printf("[Provision] Node failed callback for resource %s: %s", callback.ResourceID, callback.ErrorMessage)
 
-	resource, err := s.resourceRepo.GetByID(ctx, callback.ResourceID)
+	hp, err := s.hostingRepo.GetByID(ctx, callback.ResourceID)
 	if err != nil {
-		return fmt.Errorf("get resource: %w", err)
+		return fmt.Errorf("get hosting provision: %w", err)
 	}
 
-	s.handleProvisionError(context.Background(), resource.SubscriptionID, resource.ID, callback.ErrorMessage)
+	s.handleProvisionError(context.Background(), hp.SubscriptionID, hp.ID, callback.ErrorMessage)
 	return nil
 }
 
@@ -241,104 +240,101 @@ func (s *ProvisionService) HandleNodeFailed(ctx context.Context, callback *model
 func (s *ProvisionService) Deprovision(ctx context.Context, req *models.DeprovisionRequest) (*models.DeprovisionResponse, error) {
 	log.Printf("[Deprovision] Starting deprovisioning for subscription=%s", req.SubscriptionID)
 
-	var resource *models.Resource
+	var hp *models.HostingProvision
 	var err error
 
 	if req.ResourceID != "" {
-		resource, err = s.resourceRepo.GetByID(ctx, req.ResourceID)
+		hp, err = s.hostingRepo.GetByID(ctx, req.ResourceID)
 	} else {
-		resources, err := s.resourceRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
-		if err == nil && len(resources) > 0 {
-			resource = resources[0]
+		provisions, qErr := s.hostingRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
+		if qErr == nil && len(provisions) > 0 {
+			hp = provisions[0]
+		} else {
+			err = qErr
 		}
 	}
 
-	if err != nil || resource == nil {
+	if err != nil || hp == nil {
 		return nil, fmt.Errorf("resource not found")
 	}
 
-	// Start async deprovisioning
-	go s.deprovisionAsync(resource, req.Reason)
+	go s.deprovisionAsync(hp, req.Reason)
 
 	return &models.DeprovisionResponse{
-		ResourceID: resource.ID,
+		ResourceID: hp.ID,
 		Status:     models.StatusStopping,
 		Message:    "Deprovisioning started",
 	}, nil
 }
 
 // deprovisionAsync handles the actual deprovisioning in the background
-func (s *ProvisionService) deprovisionAsync(resource *models.Resource, reason string) {
+func (s *ProvisionService) deprovisionAsync(hp *models.HostingProvision, reason string) {
 	ctx := context.Background()
 
-	s.updateStatus(ctx, resource.ID, models.StatusStopping, nil)
+	s.updateStatus(ctx, hp.ID, models.StatusStopping, nil)
 
 	// Delete node via hosting-service
-	if resource.InstanceID != nil && *resource.InstanceID != "" {
-		_, err := s.hostingClient.DeleteNode(ctx, *resource.InstanceID)
+	if hp.HostingNodeID != "" {
+		_, err := s.hostingClient.DeleteNode(ctx, hp.HostingNodeID)
 		if err != nil {
 			log.Printf("[Deprovision] Warning: failed to delete node: %v", err)
 		}
 	}
 
-	// Update status
 	now := time.Now()
-	resource.Status = models.StatusDeleted
-	resource.DeletedAt = &now
-	s.resourceRepo.Update(ctx, resource)
+	hp.Status = models.StatusDeleted
+	hp.DeletedAt = &now
+	s.hostingRepo.Update(ctx, hp)
 
-	s.logRepo.LogAction(ctx, resource.ID, "deprovisioned", "deleted",
+	s.logRepo.LogAction(ctx, hp.ID, "hosting", "deprovisioned", "deleted",
 		fmt.Sprintf("Resource deprovisioned. Reason: %s", reason))
 
 	// Notify subscription-service
-	if err := s.subscriptionClient.NotifyDeleted(ctx, resource.SubscriptionID, resource.ID); err != nil {
+	if err := s.subscriptionClient.NotifyDeleted(ctx, hp.SubscriptionID, hp.ID); err != nil {
 		log.Printf("[Deprovision] Failed to notify subscription-service (deleted): %v", err)
 	}
 
-	log.Printf("[Deprovision] Resource %s successfully deprovisioned", resource.ID)
+	log.Printf("[Deprovision] Resource %s successfully deprovisioned", hp.ID)
 }
 
-// GetResourceStatus gets the status of a resource
+// GetResourceStatus gets the status of a hosting provision
 func (s *ProvisionService) GetResourceStatus(ctx context.Context, resourceID string) (*models.ResourceStatusResponse, error) {
-	resource, err := s.resourceRepo.GetByID(ctx, resourceID)
+	hp, err := s.hostingRepo.GetByID(ctx, resourceID)
 	if err != nil {
 		return nil, err
 	}
-
-	return s.resourceToStatusResponse(resource), nil
+	return s.hostingToStatusResponse(hp), nil
 }
 
-// GetResourcesBySubscription gets resources for a subscription
+// GetResourcesBySubscription gets hosting provisions for a subscription
 func (s *ProvisionService) GetResourcesBySubscription(ctx context.Context, subscriptionID string) ([]*models.ResourceStatusResponse, error) {
-	resources, err := s.resourceRepo.GetBySubscriptionID(ctx, subscriptionID)
+	provisions, err := s.hostingRepo.GetBySubscriptionID(ctx, subscriptionID)
 	if err != nil {
 		return nil, err
 	}
 
 	var responses []*models.ResourceStatusResponse
-	for _, r := range resources {
-		responses = append(responses, s.resourceToStatusResponse(r))
+	for _, hp := range provisions {
+		responses = append(responses, s.hostingToStatusResponse(hp))
 	}
-
 	return responses, nil
 }
 
 // GetUserNodeStatus gets node status for a user with full subscription info
-func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID, resourceType string) (*models.UserNodeStatusResponse, error) {
-	// 1. 检查用户订阅状态
+func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID string) (*models.UserNodeStatusResponse, error) {
+	// 1. Check subscription status
 	subStatus, err := s.subscriptionClient.GetUserHostingSubscription(ctx, userID)
 	if err != nil {
 		log.Printf("[GetUserNodeStatus] Error checking subscription: %v", err)
 		subStatus = nil
 	}
 
-	// 2. 检查用户节点 (包括 failed 状态)
-	resource, nodeErr := s.resourceRepo.GetLatestByUserAndType(ctx, userID, resourceType)
+	// 2. Check hosting provision (including failed)
+	hp, nodeErr := s.hostingRepo.GetLatestByUser(ctx, userID)
 
-	// 3. 构建响应
+	// 3. Build response
 	resp := &models.UserNodeStatusResponse{}
 
-	// 无订阅
 	if subStatus == nil || !subStatus.HasActive {
 		resp.HostingStatus = models.HostingStatusNoSubscription
 		resp.HasSubscription = false
@@ -347,7 +343,6 @@ func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID, resour
 		return resp, nil
 	}
 
-	// 有订阅
 	resp.HasSubscription = true
 	resp.Subscription = &models.SubscriptionInfo{
 		SubscriptionID: subStatus.SubscriptionID,
@@ -357,54 +352,51 @@ func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID, resour
 		AutoRenew:      subStatus.AutoRenew,
 	}
 
-	// 无节点
-	if nodeErr != nil || resource == nil {
+	if nodeErr != nil || hp == nil {
 		resp.HostingStatus = models.HostingStatusSubscribedNoNode
 		resp.HasNode = false
 		resp.Message = "You have an active subscription. You can create a node now."
 		return resp, nil
 	}
 
-	// 有节点 - 根据状态返回不同信息
 	resp.HasNode = true
 
-	regionName := resource.Region
-	region, err := s.regionRepo.GetByCode(ctx, resource.Region)
+	regionName := hp.Region
+	region, err := s.regionRepo.GetByCode(ctx, hp.Region)
 	if err == nil && region != nil {
 		regionName = region.Name
 	}
 
-	trafficLimitGB := float64(resource.TrafficLimit) / (1024 * 1024 * 1024)
-	trafficUsedGB := float64(resource.TrafficUsed) / (1024 * 1024 * 1024)
+	trafficLimitGB := float64(hp.TrafficLimit) / (1024 * 1024 * 1024)
+	trafficUsedGB := float64(hp.TrafficUsed) / (1024 * 1024 * 1024)
 	trafficPercent := 0.0
-	if resource.TrafficLimit > 0 {
-		trafficPercent = (float64(resource.TrafficUsed) / float64(resource.TrafficLimit)) * 100
+	if hp.TrafficLimit > 0 {
+		trafficPercent = (float64(hp.TrafficUsed) / float64(hp.TrafficLimit)) * 100
 	}
 
 	resp.Node = &models.UserNodeInfo{
-		ResourceID:     resource.ID,
-		Region:         resource.Region,
+		ResourceID:     hp.ID,
+		Region:         hp.Region,
 		RegionName:     regionName,
-		Status:         resource.Status,
-		PublicIP:       resource.PublicIP,
-		APIPort:        resource.APIPort,
-		APIKey:         resource.APIKey,
-		VlessPort:      resource.VlessPort,
-		SSPort:         resource.SSPort,
-		PublicKey:      resource.PublicKey,
-		ShortID:        resource.ShortID,
-		PlanTier:       resource.PlanTier,
+		Status:         hp.Status,
+		PublicIP:       hp.PublicIP,
+		APIPort:        hp.APIPort,
+		APIKey:         hp.APIKey,
+		VlessPort:      hp.VlessPort,
+		SSPort:         hp.SSPort,
+		PublicKey:      hp.PublicKey,
+		ShortID:        hp.ShortID,
+		PlanTier:       hp.PlanTier,
 		TrafficLimitGB: trafficLimitGB,
 		TrafficUsedGB:  trafficUsedGB,
 		TrafficPercent: trafficPercent,
-		CreatedAt:      resource.CreatedAt.Format(time.RFC3339),
+		CreatedAt:      hp.CreatedAt.Format(time.RFC3339),
 	}
 
-	// 根据节点状态设置 HostingStatus
-	switch resource.Status {
+	switch hp.Status {
 	case models.StatusPending, models.StatusCreating, models.StatusRunning, models.StatusInstalling:
 		resp.HostingStatus = models.HostingStatusNodeCreating
-		resp.CreationProgress = s.buildCreationProgress(resource.Status)
+		resp.CreationProgress = s.buildCreationProgress(hp.Status)
 		resp.Message = "Node is being created. Please wait..."
 	case models.StatusActive:
 		resp.HostingStatus = models.HostingStatusNodeActive
@@ -422,7 +414,6 @@ func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID, resour
 	return resp, nil
 }
 
-// buildCreationProgress builds the creation progress based on status
 func (s *ProvisionService) buildCreationProgress(status string) *models.NodeCreationProgress {
 	steps := []models.NodeCreationStep{
 		{Step: 1, Name: "Payment confirmed", Status: "completed"},
@@ -495,7 +486,6 @@ func (s *ProvisionService) GetAvailableRegions(ctx context.Context) (*models.Reg
 func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region string) (*models.CreateNodeResponse, error) {
 	log.Printf("[CreateUserNode] Creating node for user=%s, region=%s", userID, region)
 
-	// 1. 检查订阅状态
 	subStatus, err := s.subscriptionClient.GetUserHostingSubscription(ctx, userID)
 	if err != nil {
 		log.Printf("[CreateUserNode] Error checking subscription: %v", err)
@@ -514,8 +504,7 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 		}, nil
 	}
 
-	// 2. 检查是否已有节点 (包括失败状态)
-	existing, _ := s.resourceRepo.GetLatestByUserAndType(ctx, userID, models.ResourceTypeHostingNode)
+	existing, _ := s.hostingRepo.GetLatestByUser(ctx, userID)
 	if existing != nil {
 		switch existing.Status {
 		case models.StatusActive:
@@ -533,16 +522,13 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 				Message:          "Node is already being created. Please wait.",
 			}, nil
 		case models.StatusFailed:
-			// 自动清理失败的节点，允许用户重新创建
 			log.Printf("[CreateUserNode] Auto-cleaning failed node: resource_id=%s", existing.ID)
-			if err := s.cleanupFailedResource(ctx, existing); err != nil {
+			if err := s.cleanupFailedProvision(ctx, existing); err != nil {
 				log.Printf("[CreateUserNode] Warning: failed to cleanup failed node: %v", err)
 			}
-			// 继续创建新节点
 		}
 	}
 
-	// 3. 开始创建节点
 	provisionReq := &models.ProvisionRequest{
 		SubscriptionID: subStatus.SubscriptionID,
 		UserID:         userID,
@@ -574,39 +560,34 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 func (s *ProvisionService) DeleteUserNode(ctx context.Context, userID string) (*models.DeleteNodeResponse, error) {
 	log.Printf("[DeleteUserNode] Deleting node for user=%s", userID)
 
-	// 1. 检查订阅状态
 	subStatus, err := s.subscriptionClient.GetUserHostingSubscription(ctx, userID)
 	if err != nil {
 		log.Printf("[DeleteUserNode] Error checking subscription: %v", err)
 	}
 
-	// 2. 查找用户的节点 (包括失败状态)
-	resource, err := s.resourceRepo.GetLatestByUserAndType(ctx, userID, models.ResourceTypeHostingNode)
-	if err != nil || resource == nil {
+	hp, err := s.hostingRepo.GetLatestByUser(ctx, userID)
+	if err != nil || hp == nil {
 		return &models.DeleteNodeResponse{
 			Success: false,
 			Message: "No node found to delete.",
 		}, nil
 	}
 
-	// 3. 检查节点状态 - 创建中的节点不能删除
-	if resource.Status == models.StatusCreating || resource.Status == models.StatusRunning {
+	if hp.Status == models.StatusCreating || hp.Status == models.StatusRunning {
 		return &models.DeleteNodeResponse{
 			Success: false,
 			Message: "Cannot delete node while it's being created. Please wait until creation completes or fails.",
 		}, nil
 	}
 
-	// 4. 获取订阅 ID
-	subscriptionID := resource.SubscriptionID
+	subscriptionID := hp.SubscriptionID
 	if subStatus != nil && subStatus.HasActive {
 		subscriptionID = subStatus.SubscriptionID
 	}
 
-	// 5. 开始删除节点
 	_, err = s.Deprovision(ctx, &models.DeprovisionRequest{
 		SubscriptionID: subscriptionID,
-		ResourceID:     resource.ID,
+		ResourceID:     hp.ID,
 		Reason:         "User initiated deletion",
 	})
 	if err != nil {
@@ -624,19 +605,19 @@ func (s *ProvisionService) DeleteUserNode(ctx context.Context, userID string) (*
 
 // Helper functions
 
-func (s *ProvisionService) updateStatus(ctx context.Context, resourceID, status string, errorMsg *string) {
-	if err := s.resourceRepo.UpdateStatus(ctx, resourceID, status, errorMsg); err != nil {
+func (s *ProvisionService) updateStatus(ctx context.Context, provisionID, status string, errorMsg *string) {
+	if err := s.hostingRepo.UpdateStatus(ctx, provisionID, status, errorMsg); err != nil {
 		log.Printf("[Provision] Failed to update status: %v", err)
 	}
 }
 
-func (s *ProvisionService) handleProvisionError(ctx context.Context, subscriptionID, resourceID, errorMsg string) {
-	log.Printf("[Provision] Provisioning failed for %s: %s", resourceID, errorMsg)
+func (s *ProvisionService) handleProvisionError(ctx context.Context, subscriptionID, provisionID, errorMsg string) {
+	log.Printf("[Provision] Provisioning failed for %s: %s", provisionID, errorMsg)
 
-	s.updateStatus(ctx, resourceID, models.StatusFailed, &errorMsg)
-	s.logRepo.LogAction(ctx, resourceID, "provision_failed", "failed", errorMsg)
+	s.updateStatus(ctx, provisionID, models.StatusFailed, &errorMsg)
+	s.logRepo.LogAction(ctx, provisionID, "hosting", "provision_failed", "failed", errorMsg)
 
-	if err := s.subscriptionClient.NotifyFailed(ctx, subscriptionID, resourceID, errorMsg); err != nil {
+	if err := s.subscriptionClient.NotifyFailed(ctx, subscriptionID, provisionID, errorMsg); err != nil {
 		log.Printf("[Provision] Failed to notify subscription-service (failed): %v", err)
 	}
 }
@@ -644,19 +625,18 @@ func (s *ProvisionService) handleProvisionError(ctx context.Context, subscriptio
 func (s *ProvisionService) getBundleID(planTier string) string {
 	switch planTier {
 	case "premium", "3tb":
-		return "small_3_0" // 2vCPU, 2GB RAM, 60GB SSD, 3TB traffic
+		return "small_3_0"
 	case "standard", "2tb":
-		return "micro_3_0" // 2vCPU, 1GB RAM, 40GB SSD, 2TB traffic
+		return "micro_3_0"
 	case "basic", "1tb":
-		return "nano_3_0" // 2vCPU, 512MB RAM, 20GB SSD, 1TB traffic
+		return "nano_3_0"
 	default:
 		return "nano_3_0"
 	}
 }
 
-// getTrafficLimit returns traffic limit in bytes based on plan tier
 func (s *ProvisionService) getTrafficLimit(planTier string) int64 {
-	const TB = int64(1024 * 1024 * 1024 * 1024) // 1 TB in bytes
+	const TB = int64(1024 * 1024 * 1024 * 1024)
 	switch planTier {
 	case "premium", "3tb":
 		return 3 * TB
@@ -669,72 +649,65 @@ func (s *ProvisionService) getTrafficLimit(planTier string) int64 {
 	}
 }
 
-func (s *ProvisionService) resourceToStatusResponse(r *models.Resource) *models.ResourceStatusResponse {
-	trafficLimitGB := float64(r.TrafficLimit) / (1024 * 1024 * 1024)
-	trafficUsedGB := float64(r.TrafficUsed) / (1024 * 1024 * 1024)
+func (s *ProvisionService) hostingToStatusResponse(hp *models.HostingProvision) *models.ResourceStatusResponse {
+	trafficLimitGB := float64(hp.TrafficLimit) / (1024 * 1024 * 1024)
+	trafficUsedGB := float64(hp.TrafficUsed) / (1024 * 1024 * 1024)
 	trafficPercent := 0.0
-	if r.TrafficLimit > 0 {
-		trafficPercent = (float64(r.TrafficUsed) / float64(r.TrafficLimit)) * 100
+	if hp.TrafficLimit > 0 {
+		trafficPercent = (float64(hp.TrafficUsed) / float64(hp.TrafficLimit)) * 100
 	}
 
 	resp := &models.ResourceStatusResponse{
-		ResourceID:     r.ID,
-		SubscriptionID: r.SubscriptionID,
-		UserID:         r.UserID,
-		ResourceType:   r.ResourceType,
-		Provider:       r.Provider,
-		Region:         r.Region,
-		Status:         r.Status,
-		PublicIP:       r.PublicIP,
-		APIPort:        r.APIPort,
-		APIKey:         r.APIKey,
-		VlessPort:      r.VlessPort,
-		SSPort:         r.SSPort,
-		PublicKey:      r.PublicKey,
-		ShortID:        r.ShortID,
-		PlanTier:       r.PlanTier,
+		ResourceID:     hp.ID,
+		SubscriptionID: hp.SubscriptionID,
+		UserID:         hp.UserID,
+		ResourceType:   models.ResourceTypeHostingNode,
+		Provider:       hp.Provider,
+		Region:         hp.Region,
+		Status:         hp.Status,
+		PublicIP:       hp.PublicIP,
+		APIPort:        hp.APIPort,
+		APIKey:         hp.APIKey,
+		VlessPort:      hp.VlessPort,
+		SSPort:         hp.SSPort,
+		PublicKey:      hp.PublicKey,
+		ShortID:        hp.ShortID,
+		PlanTier:       hp.PlanTier,
 		TrafficLimitGB: trafficLimitGB,
 		TrafficUsedGB:  trafficUsedGB,
 		TrafficPercent: trafficPercent,
-		CreatedAt:      r.CreatedAt.Format(time.RFC3339),
-		ErrorMessage:   r.ErrorMessage,
+		CreatedAt:      hp.CreatedAt.Format(time.RFC3339),
+		ErrorMessage:   hp.ErrorMessage,
 	}
 
-	if r.ReadyAt != nil {
-		readyAt := r.ReadyAt.Format(time.RFC3339)
+	if hp.ReadyAt != nil {
+		readyAt := hp.ReadyAt.Format(time.RFC3339)
 		resp.ReadyAt = &readyAt
 	}
 
 	return resp
 }
 
-// cleanupFailedResource cleans up a failed resource by marking it as deleted
-// This allows users to retry creating a new node without manually deleting the failed one
-func (s *ProvisionService) cleanupFailedResource(ctx context.Context, resource *models.Resource) error {
-	log.Printf("[cleanupFailedResource] Cleaning up failed resource: id=%s, user=%s", resource.ID, resource.UserID)
+func (s *ProvisionService) cleanupFailedProvision(ctx context.Context, hp *models.HostingProvision) error {
+	log.Printf("[cleanupFailedProvision] Cleaning up failed provision: id=%s, user=%s", hp.ID, hp.UserID)
 
-	// 1. 如果有外部资源（如 Lightsail 实例），尝试清理
-	if resource.InstanceID != nil && *resource.InstanceID != "" {
-		log.Printf("[cleanupFailedResource] Attempting to cleanup external resource: %s", *resource.InstanceID)
-		// 调用 hosting service 删除（最佳努力，失败也继续）
-		if _, err := s.hostingClient.DeleteNode(ctx, *resource.InstanceID); err != nil {
-			log.Printf("[cleanupFailedResource] Warning: failed to delete external resource: %v", err)
-			// 继续执行，不阻塞
+	if hp.HostingNodeID != "" {
+		log.Printf("[cleanupFailedProvision] Attempting to cleanup external resource: %s", hp.HostingNodeID)
+		if _, err := s.hostingClient.DeleteNode(ctx, hp.HostingNodeID); err != nil {
+			log.Printf("[cleanupFailedProvision] Warning: failed to delete external resource: %v", err)
 		}
 	}
 
-	// 2. 将资源标记为已删除
 	now := time.Now()
-	resource.Status = models.StatusDeleted
-	resource.DeletedAt = &now
+	hp.Status = models.StatusDeleted
+	hp.DeletedAt = &now
 
-	if err := s.resourceRepo.Update(ctx, resource); err != nil {
-		return fmt.Errorf("failed to mark resource as deleted: %w", err)
+	if err := s.hostingRepo.Update(ctx, hp); err != nil {
+		return fmt.Errorf("failed to mark provision as deleted: %w", err)
 	}
 
-	// 3. 记录操作日志
-	s.logRepo.LogAction(ctx, resource.ID, "auto_cleanup", "deleted", "Auto-cleaned failed resource to allow retry")
+	s.logRepo.LogAction(ctx, hp.ID, "hosting", "auto_cleanup", "deleted", "Auto-cleaned failed resource to allow retry")
 
-	log.Printf("[cleanupFailedResource] Successfully cleaned up failed resource: %s", resource.ID)
+	log.Printf("[cleanupFailedProvision] Successfully cleaned up failed provision: %s", hp.ID)
 	return nil
 }

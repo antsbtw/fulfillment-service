@@ -4,14 +4,25 @@ package models
 
 // ProvisionRequest is sent by subscription-service to create a resource
 type ProvisionRequest struct {
-	SubscriptionID string `json:"subscription_id" binding:"required"`
+	// Three-level classification (new fields, preferred)
+	AppSource    string `json:"app_source"`    // otun / obox
+	BusinessType string `json:"business_type"` // purchase / subscription / trial / gift
+
+	// Association
+	SubscriptionID string `json:"subscription_id"`
 	UserID         string `json:"user_id" binding:"required"`
-	UserEmail      string `json:"user_email"`                       // Optional, for VPN user creation
-	ResourceType   string `json:"resource_type" binding:"required"` // hosting_node, otun_node, vpn_user
-	PlanTier       string `json:"plan_tier" binding:"required"`     // basic, standard, premium, unlimited
-	Region         string `json:"region"`                           // Optional, auto-select if empty
-	TrafficLimit   int64  `json:"traffic_limit"`                    // Optional, in bytes
-	ExpireDays     int    `json:"expire_days"`                      // Optional, for VPN user, default 30
+	UserEmail      string `json:"user_email"`
+
+	// Resource parameters
+	ResourceType string `json:"resource_type"` // Legacy: hosting_node, otun_node, vpn_user
+	PlanTier     string `json:"plan_tier"`     // basic, standard, premium, unlimited
+	Region       string `json:"region"`
+	TrafficLimit int64  `json:"traffic_limit"`
+	ExpireDays   int    `json:"expire_days"`
+	Channel      string `json:"channel"` // apple, google, stripe, credit
+
+	// Trial-specific
+	DeviceID string `json:"device_id,omitempty"`
 }
 
 // ProvisionResponse is returned after starting provisioning

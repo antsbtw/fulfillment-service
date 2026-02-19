@@ -18,7 +18,7 @@ import (
 // VPNService handles VPN user provisioning operations
 type VPNService struct {
 	cfg                *config.Config
-	resourceRepo       *repository.ResourceRepository
+	vpnRepo            *repository.VPNProvisionRepository
 	logRepo            *repository.LogRepository
 	otunClient         *client.OTunClient
 	subscriptionClient *client.SubscriptionClient
@@ -27,63 +27,72 @@ type VPNService struct {
 // NewVPNService creates a new VPN service
 func NewVPNService(
 	cfg *config.Config,
-	resourceRepo *repository.ResourceRepository,
+	vpnRepo *repository.VPNProvisionRepository,
 	logRepo *repository.LogRepository,
 	otunClient *client.OTunClient,
 	subscriptionClient *client.SubscriptionClient,
 ) *VPNService {
 	return &VPNService{
 		cfg:                cfg,
-		resourceRepo:       resourceRepo,
+		vpnRepo:            vpnRepo,
 		logRepo:            logRepo,
 		otunClient:         otunClient,
 		subscriptionClient: subscriptionClient,
 	}
 }
 
-// ProvisionVPNUser creates a new VPN user in otun-manager
+// ProvisionVPNUser creates or renews a VPN user in otun-manager
 func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
-	// 日志脱敏: 仅记录必要的非敏感信息
-	log.Printf("[VPNService] Provisioning VPN user for subscription=%s, plan=%s",
-		req.SubscriptionID, req.PlanTier)
+	log.Printf("[VPNService] Provisioning VPN user for subscription=%s, plan=%s, channel=%s",
+		req.SubscriptionID, req.PlanTier, req.Channel)
 
-	// 1. Check if user already has an active VPN resource
-	existing, err := s.resourceRepo.GetActiveByUserAndType(ctx, req.UserID, models.ResourceTypeVPNUser)
-	if err == nil && existing != nil {
-		// 用户已存在，更新 expire_at 和 traffic_limit（续购场景）
-		vpnUserID := ""
-		if existing.InstanceID != nil {
-			vpnUserID = *existing.InstanceID
+	// Determine business_type from request
+	businessType := req.BusinessType
+	if businessType == "" {
+		businessType = models.BusinessTypeSubscription
+	}
+
+	// Determine service_tier from plan_tier
+	serviceTier := models.MapPlanToServiceTier(req.PlanTier)
+
+	// 1. Check if user already has a current VPN provision
+	existing, err := s.vpnRepo.GetCurrentByUserAnyStatus(ctx, req.UserID)
+	if err == nil && existing != nil && existing.OtunUUID != nil && *existing.OtunUUID != "" {
+		// Renewal scenario: update expire_at and traffic_limit
+		vpnUserID := *existing.OtunUUID
+		expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
+		trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
+
+		// Time stacking: new_expire = max(current_expire, now) + days
+		expireAt := s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+
+		enabled := true
+		updateReq := &client.UpdateVPNUserRequest{
+			TrafficLimit: trafficLimit,
+			ExpireAt:     expireAt.Format(time.RFC3339),
+			Enabled:      &enabled,
 		}
 
-		if vpnUserID != "" && req.ExpireDays > 0 {
-			trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
-
-			// 时长叠加：从 otun-manager 获取当前到期时间，如果未过期则叠加
-			expireAt := s.calculateExpireAtWithStacking(ctx, vpnUserID, req.ExpireDays)
-
-			enabled := true
-			updateReq := &client.UpdateVPNUserRequest{
-				TrafficLimit: trafficLimit,
-				ExpireAt:     expireAt.Format(time.RFC3339),
-				Enabled:      &enabled,
-			}
-
-			if err := s.otunClient.UpdateUser(ctx, vpnUserID, updateReq); err != nil {
-				log.Printf("[VPNService] Warning: failed to update existing VPN user: %v", err)
-			} else {
-				log.Printf("[VPNService] Updated existing VPN user %s: expire=%s, traffic=%d",
-					vpnUserID, expireAt.Format(time.RFC3339), trafficLimit)
-			}
-
-			// 更新本地 resource 记录
-			existing.TrafficLimit = trafficLimit
-			s.resourceRepo.Update(ctx, existing)
+		if err := s.otunClient.UpdateUser(ctx, vpnUserID, updateReq); err != nil {
+			log.Printf("[VPNService] Warning: failed to update existing VPN user: %v", err)
+		} else {
+			log.Printf("[VPNService] Updated existing VPN user %s: expire=%s, traffic=%d",
+				vpnUserID, expireAt.Format(time.RFC3339), trafficLimit)
 		}
+
+		// Update local provision record
+		existing.TrafficLimit = trafficLimit
+		existing.SubscriptionID = req.SubscriptionID
+		existing.Channel = req.Channel
+		existing.BusinessType = businessType
+		existing.ServiceTier = serviceTier
+		existing.PlanTier = req.PlanTier
+		existing.Status = models.VPNProvisionStatusActive
+		s.vpnRepo.Update(ctx, existing)
 
 		return &models.ProvisionResponse{
 			ResourceID: existing.ID,
-			Status:     existing.Status,
+			Status:     models.StatusActive,
 			VPNUserID:  vpnUserID,
 			Message:    "VPN user updated (renewal)",
 		}, nil
@@ -91,81 +100,104 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 
 	// 2. Calculate traffic limit and expire time
 	trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
-	log.Printf("[VPNService] ProvisionVPNUser: req.ExpireDays=%d, req.TrafficLimit=%d", req.ExpireDays, req.TrafficLimit)
-	expireAt := s.calculateExpireAt(req.ExpireDays)
-	log.Printf("[VPNService] Calculated expireAt=%s", expireAt.Format(time.RFC3339))
+	expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
+	expireAt := s.calculateExpireAt(expireDays)
+	log.Printf("[VPNService] ProvisionVPNUser: expireDays=%d, trafficLimit=%d, expireAt=%s",
+		expireDays, trafficLimit, expireAt.Format(time.RFC3339))
 
-	// 3. Generate VPN user credentials
-	vpnUserID := uuid.New().String()
-	ssPassword := generateRandomPassword(16)
+	// 3. Check if user has an existing otun_uuid from any previous provision (e.g., trial)
+	existingOtunUUID, _ := s.vpnRepo.GetOtunUUIDByUser(ctx, req.UserID)
 
-	// 4. Create user in otun-manager
-	otunReq := &client.CreateVPNUserRequest{
-		UUID:         vpnUserID,
-		Email:        req.UserEmail,
-		ExternalID:   "",          // 留空，后续由支付 webhook 填入 apple_xxx
-		AuthUserID:   req.UserID,  // auth UUID 存入专用字段
-		Protocols:    []string{"vless", "shadowsocks"},
-		SSPassword:   ssPassword,
-		TrafficLimit: trafficLimit,
-		ExpireAt:     expireAt.Format(time.RFC3339),
-		ServiceTier:  req.PlanTier, // Pass plan tier for node assignment
+	var actualVPNUserID string
+
+	if existingOtunUUID != nil && *existingOtunUUID != "" {
+		// Reuse existing otun_uuid (e.g., trial → purchase conversion)
+		actualVPNUserID = *existingOtunUUID
+		enabled := true
+		updateReq := &client.UpdateVPNUserRequest{
+			TrafficLimit: trafficLimit,
+			ExpireAt:     expireAt.Format(time.RFC3339),
+			Enabled:      &enabled,
+		}
+		if err := s.otunClient.UpdateUser(ctx, actualVPNUserID, updateReq); err != nil {
+			return nil, fmt.Errorf("failed to update existing VPN user: %w", err)
+		}
+
+		// Mark old provision as not current (trial → converted)
+		if existing != nil {
+			s.vpnRepo.MarkNotCurrent(ctx, existing.ID)
+		}
+	} else {
+		// Create new VPN user in otun-manager
+		vpnUserID := uuid.New().String()
+		ssPassword := generateRandomPassword(16)
+
+		otunReq := &client.CreateVPNUserRequest{
+			UUID:         vpnUserID,
+			Email:        req.UserEmail,
+			AuthUserID:   req.UserID,
+			Protocols:    []string{"vless", "shadowsocks"},
+			SSPassword:   ssPassword,
+			TrafficLimit: trafficLimit,
+			ExpireAt:     expireAt.Format(time.RFC3339),
+			ServiceTier:  serviceTier,
+		}
+
+		otunResp, err := s.otunClient.CreateUser(ctx, otunReq)
+		if err != nil {
+			s.logRepo.LogAction(ctx, "", "vpn", "vpn_user_create_failed", "failed", err.Error())
+			return nil, fmt.Errorf("failed to create VPN user in otun-manager: %w", err)
+		}
+
+		actualVPNUserID = otunResp.UUID
+		if actualVPNUserID == "" {
+			actualVPNUserID = vpnUserID
+		}
 	}
 
-	otunResp, err := s.otunClient.CreateUser(ctx, otunReq)
-	if err != nil {
-		s.logRepo.LogAction(ctx, "", "vpn_user_create_failed", "failed", err.Error())
-		return nil, fmt.Errorf("failed to create VPN user in otun-manager: %w", err)
-	}
-
-	// otun-manager 可能因 auth_user_id 去重返回已有用户，使用实际返回的 UUID
-	actualVPNUserID := otunResp.UUID
-	if actualVPNUserID == "" {
-		actualVPNUserID = vpnUserID
-	}
-
-	// 5. Create local resource record
-	resourceID := uuid.New().String()
-	now := time.Now()
-	resource := &models.Resource{
-		ID:             resourceID,
-		SubscriptionID: req.SubscriptionID,
+	// 4. Create local VPN provision record
+	provisionID := uuid.New().String()
+	vp := &models.VPNProvision{
+		ID:             provisionID,
 		UserID:         req.UserID,
-		ResourceType:   models.ResourceTypeVPNUser,
-		Provider:       "otun",
-		Region:         "global", // VPN users are not region-specific
-		Status:         models.StatusActive,
+		SubscriptionID: req.SubscriptionID,
+		Channel:        req.Channel,
+		BusinessType:   businessType,
+		ServiceTier:    serviceTier,
+		OtunUUID:       &actualVPNUserID,
 		PlanTier:       req.PlanTier,
+		Status:         models.VPNProvisionStatusActive,
 		TrafficLimit:   trafficLimit,
 		TrafficUsed:    0,
-		InstanceID:     &actualVPNUserID, // otun-manager 返回的实际 UUID
-		APIKey:         &ssPassword,      // SS password
-		ReadyAt:        &now,
+		ExpireAt:       &expireAt,
+		Email:          req.UserEmail,
+		IsCurrent:      true,
 	}
 
-	if err := s.resourceRepo.Create(ctx, resource); err != nil {
-		// Rollback: delete user in otun-manager
+	if err := s.vpnRepo.Create(ctx, vp); err != nil {
 		_ = s.otunClient.DeleteUser(ctx, actualVPNUserID)
-		return nil, fmt.Errorf("failed to save resource: %w", err)
+		return nil, fmt.Errorf("failed to save vpn provision: %w", err)
 	}
 
-	// 6. Log action
-	s.logRepo.LogActionWithMetadata(ctx, resourceID, "vpn_user_created", "active",
+	// 5. Log action
+	s.logRepo.LogActionWithMetadata(ctx, provisionID, "vpn", "vpn_user_created", "active",
 		"VPN user created successfully",
 		map[string]interface{}{
 			"vpn_user_id":   actualVPNUserID,
 			"plan_tier":     req.PlanTier,
+			"service_tier":  serviceTier,
 			"traffic_limit": trafficLimit,
 			"expire_at":     expireAt.Format(time.RFC3339),
+			"channel":       req.Channel,
 		})
 
-	// 7. Notify subscription-service
-	s.notifyVPNActive(ctx, req.SubscriptionID, resourceID, actualVPNUserID)
+	// 6. Notify subscription-service
+	s.notifyVPNActive(ctx, req.SubscriptionID, provisionID, actualVPNUserID)
 
-	log.Printf("[VPNService] VPN user created successfully: resource=%s, vpn_user=%s", resourceID, actualVPNUserID)
+	log.Printf("[VPNService] VPN user created successfully: provision=%s, vpn_user=%s", provisionID, actualVPNUserID)
 
 	return &models.ProvisionResponse{
-		ResourceID: resourceID,
+		ResourceID: provisionID,
 		Status:     models.StatusActive,
 		VPNUserID:  actualVPNUserID,
 		Message:    "VPN user created successfully",
@@ -173,68 +205,69 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 }
 
 // DeprovisionVPNUser disables a VPN user
-func (s *VPNService) DeprovisionVPNUser(ctx context.Context, resource *models.Resource, reason string) error {
-	log.Printf("[VPNService] Deprovisioning VPN user: resource=%s, reason=%s", resource.ID, reason)
+func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason string) error {
+	log.Printf("[VPNService] Deprovisioning VPN user: provision=%s, reason=%s", provisionID, reason)
 
-	// 1. Disable user in otun-manager
-	if resource.InstanceID != nil && *resource.InstanceID != "" {
-		if err := s.otunClient.DisableUser(ctx, *resource.InstanceID); err != nil {
+	vp, err := s.vpnRepo.GetByID(ctx, provisionID)
+	if err != nil {
+		return fmt.Errorf("vpn provision not found: %w", err)
+	}
+
+	// Disable user in otun-manager
+	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
+		if err := s.otunClient.DisableUser(ctx, *vp.OtunUUID); err != nil {
 			log.Printf("[VPNService] Warning: failed to disable VPN user in otun-manager: %v", err)
-			// Continue execution, don't block the flow
 		}
 	}
 
-	// 2. Update local status
-	now := time.Now()
-	resource.Status = models.StatusDeleted
-	resource.DeletedAt = &now
-	if err := s.resourceRepo.Update(ctx, resource); err != nil {
-		return fmt.Errorf("failed to update resource: %w", err)
+	// Update local status
+	vp.Status = models.VPNProvisionStatusDisabled
+	vp.IsCurrent = false
+	if err := s.vpnRepo.Update(ctx, vp); err != nil {
+		return fmt.Errorf("failed to update vpn provision: %w", err)
 	}
 
-	// 3. Log action
-	s.logRepo.LogAction(ctx, resource.ID, "vpn_user_deprovisioned", "deleted", reason)
+	s.logRepo.LogAction(ctx, vp.ID, "vpn", "vpn_user_deprovisioned", "disabled", reason)
 
-	// 4. Notify subscription-service
-	if err := s.subscriptionClient.NotifyDeleted(ctx, resource.SubscriptionID, resource.ID); err != nil {
-		log.Printf("[VPNService] Failed to notify subscription-service (deleted): %v", err)
+	// Notify subscription-service
+	if vp.SubscriptionID != "" {
+		if err := s.subscriptionClient.NotifyDeleted(ctx, vp.SubscriptionID, vp.ID); err != nil {
+			log.Printf("[VPNService] Failed to notify subscription-service (deleted): %v", err)
+		}
 	}
 
-	log.Printf("[VPNService] VPN user deprovisioned successfully: %s", resource.ID)
+	log.Printf("[VPNService] VPN user deprovisioned successfully: %s", vp.ID)
 	return nil
 }
 
 // UpdateVPNUser updates a VPN user (extend/upgrade)
-func (s *VPNService) UpdateVPNUser(ctx context.Context, resourceID string, req *models.UpdateVPNUserRequest) error {
-	log.Printf("[VPNService] Updating VPN user: resource=%s", resourceID)
+func (s *VPNService) UpdateVPNUser(ctx context.Context, provisionID string, req *models.UpdateVPNUserRequest) error {
+	log.Printf("[VPNService] Updating VPN user: provision=%s", provisionID)
 
-	resource, err := s.resourceRepo.GetByID(ctx, resourceID)
+	vp, err := s.vpnRepo.GetByID(ctx, provisionID)
 	if err != nil {
-		return fmt.Errorf("resource not found: %w", err)
+		return fmt.Errorf("vpn provision not found: %w", err)
 	}
 
-	if resource.InstanceID == nil || *resource.InstanceID == "" {
-		return fmt.Errorf("VPN user ID not found in resource")
+	if vp.OtunUUID == nil || *vp.OtunUUID == "" {
+		return fmt.Errorf("VPN user ID not found in provision")
 	}
 
 	// Get current user info from otun-manager
-	userInfo, err := s.otunClient.GetUser(ctx, *resource.InstanceID)
+	userInfo, err := s.otunClient.GetUser(ctx, *vp.OtunUUID)
 	if err != nil {
 		return fmt.Errorf("failed to get VPN user from otun-manager: %w", err)
 	}
 
-	// Build update request
 	updateReq := &client.UpdateVPNUserRequest{}
 	needUpdate := false
 
-	// Update traffic limit
 	if req.TrafficLimit > 0 {
 		updateReq.TrafficLimit = req.TrafficLimit
-		resource.TrafficLimit = req.TrafficLimit
+		vp.TrafficLimit = req.TrafficLimit
 		needUpdate = true
 	}
 
-	// Extend expiration
 	if req.ExtendDays > 0 {
 		currentExpire, _ := time.Parse(time.RFC3339, userInfo.ExpireAt)
 		if currentExpire.Before(time.Now()) {
@@ -245,14 +278,13 @@ func (s *VPNService) UpdateVPNUser(ctx context.Context, resourceID string, req *
 		needUpdate = true
 	}
 
-	// Update plan tier
-	if req.PlanTier != "" && req.PlanTier != resource.PlanTier {
-		resource.PlanTier = req.PlanTier
-		// Recalculate traffic limit based on new tier if not explicitly set
+	if req.PlanTier != "" && req.PlanTier != vp.PlanTier {
+		vp.PlanTier = req.PlanTier
+		vp.ServiceTier = models.MapPlanToServiceTier(req.PlanTier)
 		if req.TrafficLimit == 0 {
 			newLimit := s.calculateTrafficLimit(req.PlanTier, 0)
 			updateReq.TrafficLimit = newLimit
-			resource.TrafficLimit = newLimit
+			vp.TrafficLimit = newLimit
 		}
 		needUpdate = true
 	}
@@ -261,25 +293,23 @@ func (s *VPNService) UpdateVPNUser(ctx context.Context, resourceID string, req *
 		return nil
 	}
 
-	// Update in otun-manager
-	if err := s.otunClient.UpdateUser(ctx, *resource.InstanceID, updateReq); err != nil {
+	if err := s.otunClient.UpdateUser(ctx, *vp.OtunUUID, updateReq); err != nil {
 		return fmt.Errorf("failed to update VPN user in otun-manager: %w", err)
 	}
 
-	// Update local resource
-	if err := s.resourceRepo.Update(ctx, resource); err != nil {
-		return fmt.Errorf("failed to update resource: %w", err)
+	if err := s.vpnRepo.Update(ctx, vp); err != nil {
+		return fmt.Errorf("failed to update vpn provision: %w", err)
 	}
 
-	s.logRepo.LogActionWithMetadata(ctx, resourceID, "vpn_user_updated", "active",
+	s.logRepo.LogActionWithMetadata(ctx, provisionID, "vpn", "vpn_user_updated", "active",
 		"VPN user updated",
 		map[string]interface{}{
-			"traffic_limit": resource.TrafficLimit,
-			"plan_tier":     resource.PlanTier,
+			"traffic_limit": vp.TrafficLimit,
+			"plan_tier":     vp.PlanTier,
 			"extend_days":   req.ExtendDays,
 		})
 
-	log.Printf("[VPNService] VPN user updated successfully: %s", resourceID)
+	log.Printf("[VPNService] VPN user updated successfully: %s", provisionID)
 	return nil
 }
 
@@ -292,13 +322,12 @@ func (s *VPNService) GetUserVPNStatus(ctx context.Context, userID string) (*mode
 		subStatus = nil
 	}
 
-	// 2. Check VPN resource
-	resource, _ := s.resourceRepo.GetActiveByUserAndType(ctx, userID, models.ResourceTypeVPNUser)
+	// 2. Check VPN provision
+	vp, _ := s.vpnRepo.GetCurrentByUser(ctx, userID)
 
 	// 3. Build response
 	resp := &models.VPNStatusResponse{}
 
-	// No subscription
 	if subStatus == nil || !subStatus.HasActive {
 		resp.VPNStatus = models.VPNStatusNoSubscription
 		resp.HasSubscription = false
@@ -307,7 +336,6 @@ func (s *VPNService) GetUserVPNStatus(ctx context.Context, userID string) (*mode
 		return resp, nil
 	}
 
-	// Has subscription
 	resp.HasSubscription = true
 	resp.Subscription = &models.SubscriptionInfo{
 		SubscriptionID: subStatus.SubscriptionID,
@@ -317,45 +345,49 @@ func (s *VPNService) GetUserVPNStatus(ctx context.Context, userID string) (*mode
 		AutoRenew:      subStatus.AutoRenew,
 	}
 
-	// No VPN user
-	if resource == nil {
+	if vp == nil {
 		resp.VPNStatus = models.VPNStatusExpired
 		resp.HasVPNUser = false
 		resp.Message = "VPN subscription active but no VPN user found. Please contact support."
 		return resp, nil
 	}
 
-	// Has VPN user
 	resp.HasVPNUser = true
 
-	trafficLimitGB := float64(resource.TrafficLimit) / (1024 * 1024 * 1024)
-	trafficUsedGB := float64(resource.TrafficUsed) / (1024 * 1024 * 1024)
+	trafficLimitGB := float64(vp.TrafficLimit) / (1024 * 1024 * 1024)
+	trafficUsedGB := float64(vp.TrafficUsed) / (1024 * 1024 * 1024)
 	trafficPercent := 0.0
-	if resource.TrafficLimit > 0 {
-		trafficPercent = (float64(resource.TrafficUsed) / float64(resource.TrafficLimit)) * 100
+	if vp.TrafficLimit > 0 {
+		trafficPercent = (float64(vp.TrafficUsed) / float64(vp.TrafficLimit)) * 100
 	}
 
 	vpnUserID := ""
-	if resource.InstanceID != nil {
-		vpnUserID = *resource.InstanceID
+	if vp.OtunUUID != nil {
+		vpnUserID = *vp.OtunUUID
+	}
+
+	expireAtStr := ""
+	if vp.ExpireAt != nil {
+		expireAtStr = vp.ExpireAt.Format(time.RFC3339)
 	}
 
 	resp.VPNUser = &models.VPNUserInfo{
-		ResourceID:     resource.ID,
+		ResourceID:     vp.ID,
 		VPNUserID:      vpnUserID,
-		Status:         resource.Status,
-		PlanTier:       resource.PlanTier,
+		Status:         vp.Status,
+		PlanTier:       vp.PlanTier,
 		TrafficLimitGB: trafficLimitGB,
 		TrafficUsedGB:  trafficUsedGB,
 		TrafficPercent: trafficPercent,
-		CreatedAt:      resource.CreatedAt.Format(time.RFC3339),
+		ExpireAt:       expireAtStr,
+		CreatedAt:      vp.CreatedAt.Format(time.RFC3339),
 	}
 
-	switch resource.Status {
-	case models.StatusActive:
+	switch vp.Status {
+	case models.VPNProvisionStatusActive:
 		resp.VPNStatus = models.VPNStatusActive
 		resp.Message = "VPN is active and ready to use."
-	case models.StatusDeleted:
+	case models.VPNProvisionStatusExpired:
 		resp.VPNStatus = models.VPNStatusExpired
 		resp.Message = "VPN subscription expired."
 	default:
@@ -368,14 +400,12 @@ func (s *VPNService) GetUserVPNStatus(ctx context.Context, userID string) (*mode
 
 // GetUserVPNSubscribeConfig gets VPN subscription configuration for a user
 func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID string) (*models.VPNSubscribeResponse, error) {
-	// 1. Verify user has active VPN resource
-	resource, err := s.resourceRepo.GetActiveByUserAndType(ctx, userID, models.ResourceTypeVPNUser)
-	if err != nil || resource == nil {
+	vp, err := s.vpnRepo.GetCurrentByUser(ctx, userID)
+	if err != nil || vp == nil {
 		return nil, fmt.Errorf("no active VPN subscription")
 	}
 
-	// 2. Get subscription config from otun-manager
-	// Use auth UUID (userID) as device_id — otun-manager will match via auth_user_id fallback
+	// Use auth UUID as device_id
 	deviceID := userID
 
 	subscribeReq := &client.SubscribeRequest{
@@ -387,7 +417,6 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 		return nil, fmt.Errorf("failed to get VPN config from otun-manager: %w", err)
 	}
 
-	// 3. Build response
 	var protocols []models.VPNProtocol
 	for _, p := range config.Protocols {
 		protocols = append(protocols, models.VPNProtocol{
@@ -402,29 +431,29 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 		SubscribeURL: fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
 		DeviceID:     deviceID,
 		Protocols:    protocols,
-		TrafficLimit: resource.TrafficLimit,
-		TrafficUsed:  resource.TrafficUsed,
+		TrafficLimit: vp.TrafficLimit,
+		TrafficUsed:  vp.TrafficUsed,
 		ExpireAt:     config.ExpireAt,
 		Message:      "VPN configuration retrieved successfully",
 	}, nil
 }
 
-// GetUserVPNQuickStatus returns lightweight VPN status (no protocols, for Sync Status button)
+// GetUserVPNQuickStatus returns lightweight VPN status (no protocols)
 func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (*models.VPNQuickStatus, error) {
-	resource, err := s.resourceRepo.GetActiveByUserAndType(ctx, userID, models.ResourceTypeVPNUser)
-	if err != nil || resource == nil {
+	vp, err := s.vpnRepo.GetCurrentByUser(ctx, userID)
+	if err != nil || vp == nil {
 		return nil, fmt.Errorf("no active VPN subscription")
 	}
 
 	resp := &models.VPNQuickStatus{
-		Status:       resource.Status,
-		TrafficLimit: resource.TrafficLimit,
-		TrafficUsed:  resource.TrafficUsed,
+		Status:       vp.Status,
+		TrafficLimit: vp.TrafficLimit,
+		TrafficUsed:  vp.TrafficUsed,
 	}
 
 	// Get real-time traffic_used and expire_at from otun-manager
-	if resource.InstanceID != nil && *resource.InstanceID != "" {
-		syncResp, err := s.otunClient.SyncUser(ctx, *resource.InstanceID)
+	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
+		syncResp, err := s.otunClient.SyncUser(ctx, *vp.OtunUUID)
 		if err == nil && syncResp != nil {
 			resp.ExpireAt = syncResp.ExpireAt
 			resp.TrafficUsed = syncResp.TrafficUsed
@@ -446,29 +475,43 @@ func (s *VPNService) calculateTrafficLimit(planTier string, override int64) int6
 
 	switch planTier {
 	case "unlimited":
-		return 10000 * GB // 10TB, effectively unlimited
+		return 10000 * GB
 	case "premium":
-		return 500 * GB // 500GB
+		return 500 * GB
 	case "standard":
-		return 200 * GB // 200GB
+		return 200 * GB
 	case "basic":
-		return 50 * GB // 50GB
+		return 50 * GB
 	default:
-		return 100 * GB // Default 100GB
+		return 100 * GB
+	}
+}
+
+// calculateExpireDays determines expire days based on channel
+func (s *VPNService) calculateExpireDays(channel string, requestedDays int) int {
+	switch channel {
+	case "apple", "google":
+		// Subscription-based: platform manages renewal cycle, fixed 30 days
+		return 30
+	default:
+		// Purchase-based (Stripe etc): use requested days
+		if requestedDays > 0 {
+			return requestedDays
+		}
+		return 30
 	}
 }
 
 // calculateExpireAt calculates expiration time from now (for new users)
 func (s *VPNService) calculateExpireAt(days int) time.Time {
 	if days <= 0 {
-		days = 30 // Default 30 days
+		days = 30
 	}
 	return time.Now().AddDate(0, 0, days)
 }
 
 // calculateExpireAtWithStacking queries otun-manager for the user's current expire_at,
 // and stacks the new days on top if the subscription hasn't expired yet.
-// If the subscription is already expired or the query fails, falls back to time.Now() + days.
 func (s *VPNService) calculateExpireAtWithStacking(ctx context.Context, vpnUserID string, days int) time.Time {
 	if days <= 0 {
 		days = 30
@@ -492,20 +535,21 @@ func (s *VPNService) calculateExpireAtWithStacking(ctx context.Context, vpnUserI
 	}
 
 	if currentExpire.After(time.Now()) {
-		// 订阅未过期，从现有到期时间叠加
 		newExpire := currentExpire.AddDate(0, 0, days)
 		log.Printf("[VPNService] Stacking time: current expires %s + %d days = %s",
 			currentExpire.Format(time.RFC3339), days, newExpire.Format(time.RFC3339))
 		return newExpire
 	}
 
-	// 订阅已过期，从当前时间开始
 	log.Printf("[VPNService] Subscription expired at %s, starting fresh from now", currentExpire.Format(time.RFC3339))
 	return time.Now().AddDate(0, 0, days)
 }
 
 // notifyVPNActive notifies subscription-service that VPN is active
 func (s *VPNService) notifyVPNActive(ctx context.Context, subscriptionID, resourceID, vpnUserID string) {
+	if subscriptionID == "" {
+		return
+	}
 	callback := &models.SubscriptionCallback{
 		SubscriptionID: subscriptionID,
 		ResourceID:     resourceID,
@@ -520,7 +564,6 @@ func (s *VPNService) notifyVPNActive(ctx context.Context, subscriptionID, resour
 func generateRandomPassword(length int) string {
 	bytes := make([]byte, length)
 	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to UUID if crypto/rand fails
 		return uuid.New().String()[:length]
 	}
 	return hex.EncodeToString(bytes)[:length]

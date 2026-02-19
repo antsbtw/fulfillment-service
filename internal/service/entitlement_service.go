@@ -14,22 +14,23 @@ import (
 )
 
 // EntitlementService handles trial, gift, and other entitlement operations
+// Uses VPNProvisionRepository (vpn_provisions table) for all storage
 type EntitlementService struct {
-	cfg             *config.Config
-	entitlementRepo *repository.EntitlementRepository
-	otunClient      *client.OTunClient
+	cfg        *config.Config
+	vpnRepo    *repository.VPNProvisionRepository
+	otunClient *client.OTunClient
 }
 
 // NewEntitlementService creates a new entitlement service
 func NewEntitlementService(
 	cfg *config.Config,
-	entitlementRepo *repository.EntitlementRepository,
+	vpnRepo *repository.VPNProvisionRepository,
 	otunClient *client.OTunClient,
 ) *EntitlementService {
 	return &EntitlementService{
-		cfg:             cfg,
-		entitlementRepo: entitlementRepo,
-		otunClient:      otunClient,
+		cfg:        cfg,
+		vpnRepo:    vpnRepo,
+		otunClient: otunClient,
 	}
 }
 
@@ -44,8 +45,8 @@ func (s *EntitlementService) GetTrialConfig() *models.TrialConfigResponse {
 
 // GetTrialStatus checks trial status for a user (JWT auth required)
 func (s *EntitlementService) GetTrialStatus(ctx context.Context, userID string) (*models.TrialStatusResponse, error) {
-	// 1. Query entitlements table for this user's trial
-	entitlement, err := s.entitlementRepo.GetByUserIDAndSource(ctx, userID, models.EntitlementSourceTrial)
+	// Query vpn_provisions for this user's trial
+	vp, err := s.vpnRepo.GetByUserAndBusinessType(ctx, userID, models.BusinessTypeTrial)
 	if err != nil {
 		// No trial record found
 		return &models.TrialStatusResponse{
@@ -55,37 +56,31 @@ func (s *EntitlementService) GetTrialStatus(ctx context.Context, userID string) 
 		}, nil
 	}
 
-	// 2. Trial record exists
 	resp := &models.TrialStatusResponse{
 		TrialAvailable: false,
 		TrialUsed:      true,
 	}
 
-	// 3. If otun_uuid is set, sync from otun-manager to get current status and protocols
-	if entitlement.OtunUUID != nil && *entitlement.OtunUUID != "" {
-		syncResp, err := s.otunClient.SyncUser(ctx, *entitlement.OtunUUID)
+	// If otun_uuid is set, sync from otun-manager
+	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
+		syncResp, err := s.otunClient.SyncUser(ctx, *vp.OtunUUID)
 		if err != nil {
-			log.Printf("[EntitlementService] Failed to sync from otun-manager for %s: %v", *entitlement.OtunUUID, err)
-			// Return basic info from local record
-			resp.ExistingTrial = s.buildTrialInfoFromEntitlement(entitlement)
+			log.Printf("[EntitlementService] Failed to sync from otun-manager for %s: %v", *vp.OtunUUID, err)
+			resp.ExistingTrial = s.buildTrialInfoFromProvision(vp)
 			return resp, nil
 		}
 
-		// Update local traffic_used from otun-manager
-		if syncResp.TrafficUsed != entitlement.TrafficUsed {
-			_ = s.entitlementRepo.UpdateTrafficUsed(ctx, entitlement.ID, syncResp.TrafficUsed)
+		// Update local traffic_used
+		if syncResp.TrafficUsed != vp.TrafficUsed {
+			_ = s.vpnRepo.UpdateTrafficUsed(ctx, vp.ID, syncResp.TrafficUsed)
 		}
 
 		// Check expiration
-		expired := repository.IsExpired(entitlement)
-		if entitlement.ExpireAt != nil && time.Now().After(*entitlement.ExpireAt) {
-			expired = true
-		}
-		if entitlement.TrafficLimit > 0 && syncResp.TrafficUsed >= entitlement.TrafficLimit {
+		expired := repository.IsVPNExpired(vp)
+		if vp.TrafficLimit > 0 && syncResp.TrafficUsed >= vp.TrafficLimit {
 			expired = true
 		}
 
-		// Build protocols
 		var protocols []models.TrialProtocol
 		for _, p := range syncResp.Protocols {
 			protocols = append(protocols, models.TrialProtocol{
@@ -96,13 +91,13 @@ func (s *EntitlementService) GetTrialStatus(ctx context.Context, userID string) 
 		}
 
 		expireAtStr := ""
-		if entitlement.ExpireAt != nil {
-			expireAtStr = entitlement.ExpireAt.Format(time.RFC3339)
+		if vp.ExpireAt != nil {
+			expireAtStr = vp.ExpireAt.Format(time.RFC3339)
 		}
 
 		resp.ExistingTrial = &models.TrialAccountInfo{
 			UUID:         syncResp.UUID,
-			TrafficLimit: entitlement.TrafficLimit,
+			TrafficLimit: vp.TrafficLimit,
 			TrafficUsed:  syncResp.TrafficUsed,
 			ExpireAt:     expireAtStr,
 			Enabled:      syncResp.Enabled,
@@ -110,8 +105,7 @@ func (s *EntitlementService) GetTrialStatus(ctx context.Context, userID string) 
 			Protocols:    protocols,
 		}
 	} else {
-		// otun_uuid not set (shouldn't happen normally, but handle gracefully)
-		resp.ExistingTrial = s.buildTrialInfoFromEntitlement(entitlement)
+		resp.ExistingTrial = s.buildTrialInfoFromProvision(vp)
 	}
 
 	return resp, nil
@@ -123,15 +117,15 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 		return nil, fmt.Errorf("trial is not available")
 	}
 
-	// 1. Check if user already has a trial -> 409 Conflict
-	existing, err := s.entitlementRepo.GetByUserIDAndSource(ctx, userID, models.EntitlementSourceTrial)
+	// 1. Check if user already has a trial
+	existing, err := s.vpnRepo.GetByUserAndBusinessType(ctx, userID, models.BusinessTypeTrial)
 	if err == nil && existing != nil {
 		return nil, fmt.Errorf("trial already used")
 	}
 
-	// 1.5. Check if email already used a trial (prevent abuse via delete & re-register)
+	// 1.5. Check email abuse
 	if email != "" {
-		emailUsed, err := s.entitlementRepo.ExistsTrialByEmail(ctx, email)
+		emailUsed, err := s.vpnRepo.ExistsTrialByEmail(ctx, email)
 		if err != nil {
 			log.Printf("[EntitlementService] Warning: email check failed: %v", err)
 		} else if emailUsed {
@@ -139,17 +133,17 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 		}
 	}
 
-	// 1.6. Check if device already used a trial (prevent abuse via new account on same device)
-	deviceUsed, err := s.entitlementRepo.ExistsTrialByDeviceID(ctx, deviceID)
+	// 1.6. Check device abuse
+	deviceUsed, err := s.vpnRepo.ExistsTrialByDeviceID(ctx, deviceID)
 	if err != nil {
 		log.Printf("[EntitlementService] Warning: device_id check failed: %v", err)
 	} else if deviceUsed {
 		return nil, fmt.Errorf("trial already used")
 	}
 
-	// 2. Check if user has active purchase -> 403 Already subscribed
-	activePurchase, err := s.entitlementRepo.GetActiveByUserIDAndSource(ctx, userID, models.EntitlementSourcePurchase)
-	if err == nil && activePurchase != nil {
+	// 2. Check if user has active purchase
+	activePurchase, err := s.vpnRepo.GetCurrentByUser(ctx, userID)
+	if err == nil && activePurchase != nil && activePurchase.BusinessType != models.BusinessTypeTrial {
 		return nil, fmt.Errorf("user already has an active subscription")
 	}
 
@@ -158,14 +152,14 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 	trafficLimit := int64(s.cfg.Trial.TrafficGB) * GB
 	expireAt := time.Now().Add(time.Duration(s.cfg.Trial.DurationHours) * time.Hour)
 
-	// 4. Check if user already has an otun_uuid from a previous entitlement
-	existingOtunUUID, _ := s.entitlementRepo.GetOtunUUIDByUserID(ctx, userID)
+	// 4. Check if user already has an otun_uuid from a previous provision
+	existingOtunUUID, _ := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
 
 	var otunUUID string
 	var syncResp *client.SubscribeResponse
 
 	if existingOtunUUID != nil && *existingOtunUUID != "" {
-		// User already has a VPN account, update it
+		// Reuse existing VPN account
 		otunUUID = *existingOtunUUID
 		enabled := true
 		updateReq := &client.UpdateVPNUserRequest{
@@ -177,7 +171,6 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 			return nil, fmt.Errorf("failed to update VPN user: %w", err)
 		}
 
-		// Get protocols via sync
 		syncResp, err = s.otunClient.SyncUser(ctx, otunUUID)
 		if err != nil {
 			log.Printf("[EntitlementService] Warning: sync after update failed: %v", err)
@@ -195,7 +188,7 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 			SSPassword:   ssPassword,
 			TrafficLimit: trafficLimit,
 			ExpireAt:     expireAt.Format(time.RFC3339),
-			ServiceTier:  "standard",
+			ServiceTier:  models.ServiceTierStandard,
 		}
 
 		createResp, err := s.otunClient.CreateUser(ctx, createReq)
@@ -204,33 +197,32 @@ func (s *EntitlementService) ActivateTrial(ctx context.Context, userID, email, d
 		}
 		otunUUID = createResp.UUID
 
-		// Get protocols via sync
 		syncResp, err = s.otunClient.SyncUser(ctx, otunUUID)
 		if err != nil {
 			log.Printf("[EntitlementService] Warning: sync after create failed: %v", err)
 		}
 	}
 
-	// 5. Insert entitlement record
-	entitlementID := uuid.New().String()
-	entitlement := &models.Entitlement{
-		ID:           entitlementID,
+	// 5. Insert VPN provision record (business_type=trial)
+	provisionID := uuid.New().String()
+	vp := &models.VPNProvision{
+		ID:           provisionID,
 		UserID:       userID,
-		Email:        email,
+		BusinessType: models.BusinessTypeTrial,
+		ServiceTier:  models.ServiceTierStandard,
 		OtunUUID:     &otunUUID,
-		Source:       models.EntitlementSourceTrial,
-		Status:       models.EntitlementStatusActive,
+		Status:       models.VPNProvisionStatusActive,
 		TrafficLimit: trafficLimit,
 		TrafficUsed:  0,
 		ExpireAt:     &expireAt,
-		ServiceTier:  "standard",
-		GrantedBy:    "system",
-		Note:         "",
+		Email:        email,
 		DeviceID:     deviceID,
+		GrantedBy:    "system",
+		IsCurrent:    true,
 	}
 
-	if err := s.entitlementRepo.Create(ctx, entitlement); err != nil {
-		return nil, fmt.Errorf("failed to save entitlement: %w", err)
+	if err := s.vpnRepo.Create(ctx, vp); err != nil {
+		return nil, fmt.Errorf("failed to save vpn provision: %w", err)
 	}
 
 	// 6. Build response
@@ -265,17 +257,16 @@ func (s *EntitlementService) GiftEntitlement(ctx context.Context, req *models.Gi
 	expireAt := time.Now().AddDate(0, 0, req.DurationDays)
 	serviceTier := req.ServiceTier
 	if serviceTier == "" {
-		serviceTier = "standard"
+		serviceTier = models.ServiceTierStandard
 	}
 
 	// 1. Check if user already has an otun_uuid
-	existingOtunUUID, _ := s.entitlementRepo.GetOtunUUIDByUserID(ctx, req.UserID)
+	existingOtunUUID, _ := s.vpnRepo.GetOtunUUIDByUser(ctx, req.UserID)
 
 	var otunUUID string
 	var syncResp *client.SubscribeResponse
 
 	if existingOtunUUID != nil && *existingOtunUUID != "" {
-		// Update existing VPN user
 		otunUUID = *existingOtunUUID
 		enabled := true
 		updateReq := &client.UpdateVPNUserRequest{
@@ -289,7 +280,6 @@ func (s *EntitlementService) GiftEntitlement(ctx context.Context, req *models.Gi
 
 		syncResp, _ = s.otunClient.SyncUser(ctx, otunUUID)
 	} else {
-		// Create new VPN user
 		vpnUserID := uuid.New().String()
 		ssPassword := generateRandomPassword(16)
 
@@ -313,25 +303,26 @@ func (s *EntitlementService) GiftEntitlement(ctx context.Context, req *models.Gi
 		syncResp, _ = s.otunClient.SyncUser(ctx, otunUUID)
 	}
 
-	// 2. Insert entitlement record
-	entitlementID := uuid.New().String()
-	entitlement := &models.Entitlement{
-		ID:           entitlementID,
+	// 2. Insert VPN provision record (business_type=gift)
+	provisionID := uuid.New().String()
+	vp := &models.VPNProvision{
+		ID:           provisionID,
 		UserID:       req.UserID,
-		Email:        req.Email,
+		BusinessType: models.BusinessTypeGift,
+		ServiceTier:  serviceTier,
 		OtunUUID:     &otunUUID,
-		Source:       models.EntitlementSourceGift,
-		Status:       models.EntitlementStatusActive,
+		Status:       models.VPNProvisionStatusActive,
 		TrafficLimit: trafficLimit,
 		TrafficUsed:  0,
 		ExpireAt:     &expireAt,
-		ServiceTier:  serviceTier,
+		Email:        req.Email,
 		GrantedBy:    "admin",
 		Note:         req.Note,
+		IsCurrent:    true,
 	}
 
-	if err := s.entitlementRepo.Create(ctx, entitlement); err != nil {
-		return nil, fmt.Errorf("failed to save entitlement: %w", err)
+	if err := s.vpnRepo.Create(ctx, vp); err != nil {
+		return nil, fmt.Errorf("failed to save vpn provision: %w", err)
 	}
 
 	// 3. Build response
@@ -350,7 +341,7 @@ func (s *EntitlementService) GiftEntitlement(ctx context.Context, req *models.Gi
 		req.UserID, otunUUID, req.TrafficGB, req.DurationDays)
 
 	return &models.GiftEntitlementResponse{
-		EntitlementID: entitlementID,
+		EntitlementID: provisionID,
 		OtunUUID:      otunUUID,
 		TrafficLimit:  trafficLimit,
 		ExpireAt:      expireAt.Format(time.RFC3339),
@@ -358,33 +349,33 @@ func (s *EntitlementService) GiftEntitlement(ctx context.Context, req *models.Gi
 	}, nil
 }
 
-// ListEntitlements lists entitlements with optional filters (admin/internal)
-func (s *EntitlementService) ListEntitlements(ctx context.Context, userID, source, status string) ([]*models.EntitlementInfo, error) {
-	entitlements, err := s.entitlementRepo.ListByFilters(ctx, userID, source, status)
+// ListEntitlements lists vpn provisions with optional filters (admin/internal)
+func (s *EntitlementService) ListEntitlements(ctx context.Context, userID, businessType, status string) ([]*models.EntitlementInfo, error) {
+	provisions, err := s.vpnRepo.ListByFilters(ctx, userID, businessType, status)
 	if err != nil {
 		return nil, fmt.Errorf("list entitlements: %w", err)
 	}
 
 	var results []*models.EntitlementInfo
-	for _, e := range entitlements {
+	for _, vp := range provisions {
 		info := &models.EntitlementInfo{
-			ID:           e.ID,
-			UserID:       e.UserID,
-			Email:        e.Email,
-			OtunUUID:     e.OtunUUID,
-			Source:       e.Source,
-			Status:       e.Status,
-			TrafficLimit: e.TrafficLimit,
-			TrafficUsed:  e.TrafficUsed,
-			ServiceTier:  e.ServiceTier,
-			GrantedBy:    e.GrantedBy,
-			Note:         e.Note,
-			DeviceID:     e.DeviceID,
-			CreatedAt:    e.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:    e.UpdatedAt.Format(time.RFC3339),
+			ID:           vp.ID,
+			UserID:       vp.UserID,
+			Email:        vp.Email,
+			OtunUUID:     vp.OtunUUID,
+			BusinessType: vp.BusinessType,
+			Status:       vp.Status,
+			TrafficLimit: vp.TrafficLimit,
+			TrafficUsed:  vp.TrafficUsed,
+			ServiceTier:  vp.ServiceTier,
+			GrantedBy:    vp.GrantedBy,
+			Note:         vp.Note,
+			DeviceID:     vp.DeviceID,
+			CreatedAt:    vp.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:    vp.UpdatedAt.Format(time.RFC3339),
 		}
-		if e.ExpireAt != nil {
-			expireStr := e.ExpireAt.Format(time.RFC3339)
+		if vp.ExpireAt != nil {
+			expireStr := vp.ExpireAt.Format(time.RFC3339)
 			info.ExpireAt = &expireStr
 		}
 		results = append(results, info)
@@ -393,23 +384,23 @@ func (s *EntitlementService) ListEntitlements(ctx context.Context, userID, sourc
 	return results, nil
 }
 
-// buildTrialInfoFromEntitlement builds a TrialAccountInfo from a local entitlement record
-func (s *EntitlementService) buildTrialInfoFromEntitlement(e *models.Entitlement) *models.TrialAccountInfo {
+// buildTrialInfoFromProvision builds a TrialAccountInfo from a local vpn provision record
+func (s *EntitlementService) buildTrialInfoFromProvision(vp *models.VPNProvision) *models.TrialAccountInfo {
 	otunUUID := ""
-	if e.OtunUUID != nil {
-		otunUUID = *e.OtunUUID
+	if vp.OtunUUID != nil {
+		otunUUID = *vp.OtunUUID
 	}
 	expireAtStr := ""
-	if e.ExpireAt != nil {
-		expireAtStr = e.ExpireAt.Format(time.RFC3339)
+	if vp.ExpireAt != nil {
+		expireAtStr = vp.ExpireAt.Format(time.RFC3339)
 	}
-	expired := repository.IsExpired(e)
-	enabled := e.Status == models.EntitlementStatusActive && !expired
+	expired := repository.IsVPNExpired(vp)
+	enabled := vp.Status == models.VPNProvisionStatusActive && !expired
 
 	return &models.TrialAccountInfo{
 		UUID:         otunUUID,
-		TrafficLimit: e.TrafficLimit,
-		TrafficUsed:  e.TrafficUsed,
+		TrafficLimit: vp.TrafficLimit,
+		TrafficUsed:  vp.TrafficUsed,
 		ExpireAt:     expireAtStr,
 		Enabled:      enabled,
 		Expired:      expired,
