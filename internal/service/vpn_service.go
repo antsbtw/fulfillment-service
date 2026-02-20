@@ -63,10 +63,19 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
 		trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
 
-		// All channels use fresh period from now — no time stacking
-		// Each subscription/purchase/trial sets its own independent period
-		expireAt := s.calculateExpireAt(expireDays)
-		log.Printf("[VPNService] %s subscription: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
+		// Determine expiration strategy by channel:
+		// - apple/google: platform manages renewal cycle, always fresh period
+		// - trial/gift: independent grants, always fresh period
+		// - stripe/other paid: user paid money, stack on remaining time if not expired
+		var expireAt time.Time
+		switch req.Channel {
+		case "apple", "google", "trial", "gift":
+			expireAt = s.calculateExpireAt(expireDays)
+			log.Printf("[VPNService] %s: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
+		default:
+			// Paid purchase (stripe etc): stack on remaining time to protect user's investment
+			expireAt = s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+		}
 
 		enabled := true
 		updateReq := &client.UpdateVPNUserRequest{
@@ -555,6 +564,42 @@ func (s *VPNService) calculateExpireAt(days int) time.Time {
 	if days <= 0 {
 		days = 30
 	}
+	return time.Now().AddDate(0, 0, days)
+}
+
+// calculateExpireAtWithStacking queries otun-manager for the user's current expire_at,
+// and stacks the new days on top if the subscription hasn't expired yet.
+// Used for paid purchases (Stripe etc) to protect the user's remaining time.
+func (s *VPNService) calculateExpireAtWithStacking(ctx context.Context, vpnUserID string, days int) time.Time {
+	if days <= 0 {
+		days = 30
+	}
+
+	userInfo, err := s.otunClient.GetUser(ctx, vpnUserID)
+	if err != nil {
+		log.Printf("[VPNService] Failed to get current user info for stacking, using time.Now(): %v", err)
+		return time.Now().AddDate(0, 0, days)
+	}
+
+	if userInfo.ExpireAt == "" {
+		return time.Now().AddDate(0, 0, days)
+	}
+
+	currentExpire, err := time.Parse(time.RFC3339, userInfo.ExpireAt)
+	if err != nil {
+		log.Printf("[VPNService] Failed to parse expire_at '%s': %v", userInfo.ExpireAt, err)
+		return time.Now().AddDate(0, 0, days)
+	}
+
+	// If still active, stack new days on top of remaining time
+	if currentExpire.After(time.Now()) {
+		newExpire := currentExpire.AddDate(0, 0, days)
+		log.Printf("[VPNService] Paid purchase stacking: current expires %s + %d days = %s",
+			currentExpire.Format(time.RFC3339), days, newExpire.Format(time.RFC3339))
+		return newExpire
+	}
+
+	// Already expired, start fresh
 	return time.Now().AddDate(0, 0, days)
 }
 
