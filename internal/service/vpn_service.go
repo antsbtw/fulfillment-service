@@ -63,8 +63,15 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
 		trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
 
-		// Time stacking: new_expire = max(current_expire, now) + days
-		expireAt := s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+		// Apple/Google: platform manages renewal, no time stacking — use fresh period
+		// Stripe/other: one-time purchases stack on existing remaining time
+		var expireAt time.Time
+		if req.Channel == "apple" || req.Channel == "google" {
+			expireAt = s.calculateExpireAt(expireDays)
+			log.Printf("[VPNService] %s subscription: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
+		} else {
+			expireAt = s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+		}
 
 		enabled := true
 		updateReq := &client.UpdateVPNUserRequest{
