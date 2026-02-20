@@ -1,53 +1,12 @@
 package models
 
-// ==================== Trial DTOs ====================
+// ==================== Trial Config DTO ====================
 
 // TrialConfigResponse is returned by GET /api/v1/public/trial/config
 type TrialConfigResponse struct {
 	Enabled       bool `json:"enabled"`
 	DurationHours int  `json:"duration_hours"`
 	TrafficGB     int  `json:"traffic_gb"`
-}
-
-// TrialStatusResponse is returned by GET /api/v1/my/trial/status
-type TrialStatusResponse struct {
-	TrialAvailable bool             `json:"trial_available"`
-	TrialUsed      bool             `json:"trial_used"`
-	ExistingTrial  *TrialAccountInfo `json:"existing_trial"`
-}
-
-// TrialAccountInfo contains details of an existing trial
-type TrialAccountInfo struct {
-	UUID         string          `json:"uuid"`
-	TrafficLimit int64           `json:"traffic_limit"`
-	TrafficUsed  int64           `json:"traffic_used"`
-	ExpireAt     string          `json:"expire_at"`
-	Enabled      bool            `json:"enabled"`
-	Expired      bool            `json:"expired"`
-	Protocols    []TrialProtocol `json:"protocols"`
-}
-
-// TrialProtocol represents a VPN protocol in trial response
-type TrialProtocol struct {
-	Protocol string `json:"protocol"`
-	URL      string `json:"url"`
-	Node     string `json:"node"`
-}
-
-// ActivateTrialRequest is the request for POST /api/v1/my/trial/activate
-type ActivateTrialRequest struct {
-	DeviceID string `json:"device_id" binding:"required"`
-}
-
-// ActivateTrialResponse is returned by POST /api/v1/my/trial/activate
-type ActivateTrialResponse struct {
-	UUID         string          `json:"uuid"`
-	IsTrial      bool            `json:"is_trial"`
-	TrafficLimit int64           `json:"traffic_limit"`
-	TrafficUsed  int64           `json:"traffic_used"`
-	ExpireAt     string          `json:"expire_at"`
-	Enabled      bool            `json:"enabled"`
-	Protocols    []TrialProtocol `json:"protocols"`
 }
 
 // ==================== Admin Gift DTOs ====================
@@ -68,7 +27,7 @@ type GiftEntitlementResponse struct {
 	OtunUUID      string          `json:"otun_uuid"`
 	TrafficLimit  int64           `json:"traffic_limit"`
 	ExpireAt      string          `json:"expire_at"`
-	Protocols     []TrialProtocol `json:"protocols"`
+	Protocols     []VPNProtocol `json:"protocols"`
 }
 
 // ==================== Admin Query DTOs ====================

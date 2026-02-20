@@ -114,38 +114,6 @@ func (r *VPNProvisionRepository) GetOtunUUIDByUser(ctx context.Context, userID s
 	return otunUUID, nil
 }
 
-// Trial abuse prevention checks
-
-func (r *VPNProvisionRepository) ExistsTrialByDeviceID(ctx context.Context, deviceID string) (bool, error) {
-	query := `
-		SELECT EXISTS(
-			SELECT 1 FROM fulfillment.vpn_provisions
-			WHERE device_id = $1 AND business_type = 'trial'
-		)
-	`
-	var exists bool
-	err := r.pool.QueryRow(ctx, query, deviceID).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("check trial by device_id: %w", err)
-	}
-	return exists, nil
-}
-
-func (r *VPNProvisionRepository) ExistsTrialByEmail(ctx context.Context, email string) (bool, error) {
-	query := `
-		SELECT EXISTS(
-			SELECT 1 FROM fulfillment.vpn_provisions
-			WHERE email = $1 AND business_type = 'trial'
-		)
-	`
-	var exists bool
-	err := r.pool.QueryRow(ctx, query, email).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("check trial by email: %w", err)
-	}
-	return exists, nil
-}
-
 // Update operations
 
 func (r *VPNProvisionRepository) Update(ctx context.Context, vp *models.VPNProvision) error {

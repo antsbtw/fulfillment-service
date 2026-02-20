@@ -90,9 +90,6 @@ var userRateLimiter = NewRateLimiter(30, time.Minute)
 // 说明: 业务规则限制每用户只能有一个托管节点，5 次足够处理重试和重建场景
 var createRateLimiter = NewRateLimiter(5, time.Hour)
 
-// Trial 激活速率限制器: 每 IP 每小时最多 10 次（防止滥用）
-var trialRateLimiter = NewRateLimiter(10, time.Hour)
-
 func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService) *Server {
 	gin.SetMode(cfg.Server.Mode)
 	router := gin.New()
@@ -174,10 +171,6 @@ func (s *Server) setupRoutes() {
 		// VPN management
 		user.GET("/my/vpn", s.handler.GetMyVPN)                    // 获取 VPN 状态
 		user.GET("/my/vpn/subscribe", s.handler.GetMyVPNSubscribe) // 获取 VPN 订阅配置
-
-		// Trial management (JWT auth)
-		user.GET("/my/trial/status", s.handler.GetTrialStatus)                                           // 查询试用状态
-		user.POST("/my/trial/activate", RateLimitMiddleware(trialRateLimiter), s.handler.ActivateTrial)  // 激活试用
 
 		// Regions
 		user.GET("/regions", s.handler.GetRegions)

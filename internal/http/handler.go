@@ -334,58 +334,6 @@ func (h *Handler) GetTrialConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// GetTrialStatus checks trial status for the current user (JWT auth)
-func (h *Handler) GetTrialStatus(c *gin.Context) {
-	userID, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
-		return
-	}
-
-	resp, err := h.entitlementService.GetTrialStatus(c.Request.Context(), userID.(string))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, resp)
-}
-
-// ActivateTrial activates a trial for the current user (JWT auth)
-func (h *Handler) ActivateTrial(c *gin.Context) {
-	userID, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
-		return
-	}
-
-	var req models.ActivateTrialRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	email, _ := c.Get("email")
-	emailStr, _ := email.(string)
-
-	resp, err := h.entitlementService.ActivateTrial(c.Request.Context(), userID.(string), emailStr, req.DeviceID)
-	if err != nil {
-		switch err.Error() {
-		case "trial already used":
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-		case "user already has an active subscription":
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		case "trial is not available":
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
-		return
-	}
-
-	c.JSON(http.StatusCreated, resp)
-}
-
 // GiftEntitlement creates a gift entitlement (admin/internal)
 func (h *Handler) GiftEntitlement(c *gin.Context) {
 	var req models.GiftEntitlementRequest
