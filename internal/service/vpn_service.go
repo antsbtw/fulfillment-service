@@ -46,6 +46,21 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	log.Printf("[VPNService] Provisioning VPN user for subscription=%s, plan=%s, channel=%s",
 		req.SubscriptionID, req.PlanTier, req.Channel)
 
+	// Idempotency check: if this subscription has already been provisioned, return existing result
+	if req.SubscriptionID != "" {
+		existingBySubID, _ := s.vpnRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
+		if existingBySubID != nil && existingBySubID.Status == models.VPNProvisionStatusActive && existingBySubID.OtunUUID != nil {
+			log.Printf("[VPNService] Already provisioned for subscription=%s (provision=%s), skipping",
+				req.SubscriptionID, existingBySubID.ID)
+			return &models.ProvisionResponse{
+				ResourceID: existingBySubID.ID,
+				Status:     models.StatusActive,
+				VPNUserID:  *existingBySubID.OtunUUID,
+				Message:    "Already provisioned (idempotent)",
+			}, nil
+		}
+	}
+
 	// Determine business_type from request
 	businessType := req.BusinessType
 	if businessType == "" {
@@ -66,15 +81,23 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		// Determine expiration strategy by channel:
 		// - apple/google: platform manages renewal cycle, always fresh period
 		// - trial/gift: independent grants, always fresh period
-		// - stripe/other paid: user paid money, stack on remaining time if not expired
+		// - trial/gift → stripe: channel upgrade, fresh period (don't stack free trial time)
+		// - stripe → stripe: user paid money, stack on remaining time if not expired
 		var expireAt time.Time
 		switch req.Channel {
 		case "apple", "google", "trial", "gift":
 			expireAt = s.calculateExpireAt(expireDays)
 			log.Printf("[VPNService] %s: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
 		default:
-			// Paid purchase (stripe etc): stack on remaining time to protect user's investment
-			expireAt = s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+			if existing.Channel == "trial" || existing.Channel == "gift" {
+				// Channel upgrade from free to paid: don't stack free trial/gift remaining time
+				expireAt = s.calculateExpireAt(expireDays)
+				log.Printf("[VPNService] Channel upgrade %s → %s: fresh period, expire=%s",
+					existing.Channel, req.Channel, expireAt.Format(time.RFC3339))
+			} else {
+				// Same paid channel renewal (e.g., stripe → stripe): stack on remaining time
+				expireAt = s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+			}
 		}
 
 		enabled := true
