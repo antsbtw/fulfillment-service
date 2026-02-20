@@ -87,10 +87,44 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 				vpnUserID, expireAt.Format(time.RFC3339), trafficLimit)
 		}
 
-		// Update local provision record
+		// If channel changed (e.g., trial → apple), preserve old record as history
+		if existing.Channel != req.Channel {
+			s.vpnRepo.MarkNotCurrent(ctx, existing.ID)
+			log.Printf("[VPNService] Channel changed %s → %s, creating new provision record", existing.Channel, req.Channel)
+
+			newProvisionID := uuid.New().String()
+			newExpireAt := expireAt
+			newVP := &models.VPNProvision{
+				ID:             newProvisionID,
+				UserID:         req.UserID,
+				SubscriptionID: req.SubscriptionID,
+				Channel:        req.Channel,
+				BusinessType:   businessType,
+				ServiceTier:    serviceTier,
+				OtunUUID:       existing.OtunUUID,
+				PlanTier:       req.PlanTier,
+				Status:         models.VPNProvisionStatusActive,
+				TrafficLimit:   trafficLimit,
+				TrafficUsed:    0,
+				ExpireAt:       &newExpireAt,
+				Email:          req.UserEmail,
+				IsCurrent:      true,
+			}
+			if err := s.vpnRepo.Create(ctx, newVP); err != nil {
+				log.Printf("[VPNService] Warning: failed to create new provision: %v", err)
+			}
+
+			return &models.ProvisionResponse{
+				ResourceID: newProvisionID,
+				Status:     models.StatusActive,
+				VPNUserID:  vpnUserID,
+				Message:    "VPN user updated (channel upgrade)",
+			}, nil
+		}
+
+		// Same channel renewal: update existing record in-place
 		existing.TrafficLimit = trafficLimit
 		existing.SubscriptionID = req.SubscriptionID
-		existing.Channel = req.Channel
 		existing.BusinessType = businessType
 		existing.ServiceTier = serviceTier
 		existing.PlanTier = req.PlanTier
