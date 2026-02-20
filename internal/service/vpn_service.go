@@ -63,15 +63,10 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
 		trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
 
-		// Apple/Google: platform manages renewal, no time stacking — use fresh period
-		// Stripe/other: one-time purchases stack on existing remaining time
-		var expireAt time.Time
-		if req.Channel == "apple" || req.Channel == "google" {
-			expireAt = s.calculateExpireAt(expireDays)
-			log.Printf("[VPNService] %s subscription: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
-		} else {
-			expireAt = s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
-		}
+		// All channels use fresh period from now — no time stacking
+		// Each subscription/purchase/trial sets its own independent period
+		expireAt := s.calculateExpireAt(expireDays)
+		log.Printf("[VPNService] %s subscription: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
 
 		enabled := true
 		updateReq := &client.UpdateVPNUserRequest{
@@ -560,41 +555,6 @@ func (s *VPNService) calculateExpireAt(days int) time.Time {
 	if days <= 0 {
 		days = 30
 	}
-	return time.Now().AddDate(0, 0, days)
-}
-
-// calculateExpireAtWithStacking queries otun-manager for the user's current expire_at,
-// and stacks the new days on top if the subscription hasn't expired yet.
-func (s *VPNService) calculateExpireAtWithStacking(ctx context.Context, vpnUserID string, days int) time.Time {
-	if days <= 0 {
-		days = 30
-	}
-
-	userInfo, err := s.otunClient.GetUser(ctx, vpnUserID)
-	if err != nil {
-		log.Printf("[VPNService] Failed to get current user info for stacking, using time.Now(): %v", err)
-		return time.Now().AddDate(0, 0, days)
-	}
-
-	if userInfo.ExpireAt == "" {
-		log.Printf("[VPNService] User %s has no expire_at set, using time.Now()", vpnUserID)
-		return time.Now().AddDate(0, 0, days)
-	}
-
-	currentExpire, err := time.Parse(time.RFC3339, userInfo.ExpireAt)
-	if err != nil {
-		log.Printf("[VPNService] Failed to parse expire_at '%s', using time.Now(): %v", userInfo.ExpireAt, err)
-		return time.Now().AddDate(0, 0, days)
-	}
-
-	if currentExpire.After(time.Now()) {
-		newExpire := currentExpire.AddDate(0, 0, days)
-		log.Printf("[VPNService] Stacking time: current expires %s + %d days = %s",
-			currentExpire.Format(time.RFC3339), days, newExpire.Format(time.RFC3339))
-		return newExpire
-	}
-
-	log.Printf("[VPNService] Subscription expired at %s, starting fresh from now", currentExpire.Format(time.RFC3339))
 	return time.Now().AddDate(0, 0, days)
 }
 
