@@ -400,9 +400,21 @@ func (s *VPNService) GetUserVPNStatus(ctx context.Context, userID string) (*mode
 
 // GetUserVPNSubscribeConfig gets VPN subscription configuration for a user
 func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID string) (*models.VPNSubscribeResponse, error) {
+	// Verify active subscription in subscription-service (source of truth)
+	if s.subscriptionClient != nil {
+		subStatus, err := s.subscriptionClient.GetUserVPNSubscription(ctx, userID)
+		if err != nil {
+			log.Printf("[VPNService] Error checking subscription for config: %v", err)
+			return nil, fmt.Errorf("failed to verify subscription status")
+		}
+		if subStatus == nil || !subStatus.HasActive {
+			return nil, fmt.Errorf("no active VPN subscription")
+		}
+	}
+
 	vp, err := s.vpnRepo.GetCurrentByUser(ctx, userID)
 	if err != nil || vp == nil {
-		return nil, fmt.Errorf("no active VPN subscription")
+		return nil, fmt.Errorf("no active VPN provision")
 	}
 
 	// Use auth UUID as device_id
