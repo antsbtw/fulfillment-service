@@ -508,6 +508,9 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 
 	return &models.VPNSubscribeResponse{
 		Status:       "active",
+		Channel:      vp.Channel,
+		PlanTier:     vp.PlanTier,
+		ServiceTier:  vp.ServiceTier,
 		SubscribeURL: fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
 		DeviceID:     deviceID,
 		Protocols:    protocols,
@@ -527,6 +530,8 @@ func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (
 
 	resp := &models.VPNQuickStatus{
 		Status:       vp.Status,
+		Channel:      vp.Channel,
+		PlanTier:     vp.PlanTier,
 		TrafficLimit: vp.TrafficLimit,
 		TrafficUsed:  vp.TrafficUsed,
 	}

@@ -270,6 +270,9 @@ type VPNUserInfo struct {
 // VPNSubscribeResponse is returned when getting VPN subscription config
 type VPNSubscribeResponse struct {
 	Status       string        `json:"status"`
+	Channel      string        `json:"channel"`
+	PlanTier     string        `json:"plan_tier"`
+	ServiceTier  string        `json:"service_tier"`
 	SubscribeURL string        `json:"subscribe_url"`
 	DeviceID     string        `json:"device_id"`
 	Protocols    []VPNProtocol `json:"protocols,omitempty"`
@@ -282,6 +285,8 @@ type VPNSubscribeResponse struct {
 // VPNQuickStatus is a lightweight status response without protocols
 type VPNQuickStatus struct {
 	Status       string `json:"status"`
+	Channel      string `json:"channel"`
+	PlanTier     string `json:"plan_tier"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	TrafficUsed  int64  `json:"traffic_used"`
 	ExpireAt     string `json:"expire_at,omitempty"`
