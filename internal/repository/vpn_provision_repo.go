@@ -186,6 +186,16 @@ func (r *VPNProvisionRepository) ListByFilters(ctx context.Context, userID, busi
 	return r.scanMany(rows)
 }
 
+// UpdateEmailByUserID 更新用户邮箱（邮箱绑定事件触发）
+func (r *VPNProvisionRepository) UpdateEmailByUserID(ctx context.Context, userID, email string) error {
+	query := `UPDATE fulfillment.vpn_provisions SET email = $2, updated_at = NOW() WHERE user_id = $1`
+	_, err := r.pool.Exec(ctx, query, userID, email)
+	if err != nil {
+		return fmt.Errorf("update vpn_provision email: %w", err)
+	}
+	return nil
+}
+
 // IsExpired checks if a vpn provision has expired by time or traffic
 func IsVPNExpired(vp *models.VPNProvision) bool {
 	if vp.ExpireAt != nil && time.Now().After(*vp.ExpireAt) {

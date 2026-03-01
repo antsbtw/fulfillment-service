@@ -326,6 +326,27 @@ func (h *Handler) UpdateVPNResource(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "VPN user updated successfully"})
 }
 
+// UpdateUserEmail 更新用户邮箱（subscription-service 邮箱绑定事件触发）
+// PUT /api/internal/users/:user_id/email
+func (h *Handler) UpdateUserEmail(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	var req struct {
+		Email string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email is required"})
+		return
+	}
+
+	if err := h.vpnService.UpdateUserEmail(c.Request.Context(), userID, req.Email); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "email updated"})
+}
+
 // ==================== Trial & Entitlement Handlers ====================
 
 // GetTrialConfig returns trial configuration (public, no auth)

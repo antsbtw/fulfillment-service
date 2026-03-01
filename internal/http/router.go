@@ -144,6 +144,9 @@ func (s *Server) setupRoutes() {
 		// VPN resource update (extend/upgrade)
 		internal.PUT("/resources/:id/vpn", s.handler.UpdateVPNResource)
 
+		// User email update (auth-service → subscription-service → fulfillment-service)
+		internal.PUT("/users/:user_id/email", s.handler.UpdateUserEmail)
+
 		// Entitlement management (admin)
 		internal.POST("/entitlements/gift", s.handler.GiftEntitlement)
 		internal.GET("/entitlements", s.handler.ListEntitlements)

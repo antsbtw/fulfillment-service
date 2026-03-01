@@ -56,10 +56,11 @@ type CreateVPNUserResponse struct {
 
 // UpdateVPNUserRequest is the request to update a VPN user
 type UpdateVPNUserRequest struct {
-	TrafficLimit int64  `json:"traffic_limit,omitempty"`
-	TrafficUsed  int64  `json:"traffic_used,omitempty"`
-	ExpireAt     string `json:"expire_at,omitempty"`
-	Enabled      *bool  `json:"enabled,omitempty"`
+	TrafficLimit int64   `json:"traffic_limit,omitempty"`
+	TrafficUsed  int64   `json:"traffic_used,omitempty"`
+	ExpireAt     string  `json:"expire_at,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	Email        *string `json:"email,omitempty"`
 }
 
 // VPNUserInfo contains VPN user details

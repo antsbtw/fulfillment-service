@@ -548,6 +548,34 @@ func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (
 	return resp, nil
 }
 
+// UpdateUserEmail 更新用户邮箱（subscription-service 邮箱绑定事件触发）
+// 更新 vpn_provisions 表中的 email，并转发给 otun-manager
+func (s *VPNService) UpdateUserEmail(ctx context.Context, userID, email string) error {
+	log.Printf("[VPNService] Updating user email: user=%s, email=%s", userID, email)
+
+	// 1. 更新 vpn_provisions
+	if err := s.vpnRepo.UpdateEmailByUserID(ctx, userID, email); err != nil {
+		log.Printf("[VPNService] Failed to update vpn provision email: %v", err)
+	}
+
+	// 2. 转发给 otun-manager
+	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	if err != nil || otunUUID == nil || *otunUUID == "" {
+		log.Printf("[VPNService] No otun UUID found for user %s, skipping otun-manager update", userID)
+		return nil
+	}
+
+	if err := s.otunClient.UpdateUser(ctx, *otunUUID, &client.UpdateVPNUserRequest{
+		Email: &email,
+	}); err != nil {
+		log.Printf("[VPNService] Failed to update email in otun-manager for user %s (otun=%s): %v", userID, *otunUUID, err)
+	} else {
+		log.Printf("[VPNService] Email updated in otun-manager: user=%s, otun=%s", userID, *otunUUID)
+	}
+
+	return nil
+}
+
 // Helper functions
 
 // calculateTrafficLimit calculates traffic limit based on plan tier
