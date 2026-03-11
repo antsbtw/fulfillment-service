@@ -59,6 +59,24 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		return nil, fmt.Errorf("user already has an active hosting_node resource")
 	}
 
+	// 幂等检查：同一个 subscription_id 不重复创建
+	if req.SubscriptionID != "" {
+		existingBySubID, err := s.hostingRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
+		if err == nil && len(existingBySubID) > 0 {
+			for _, ep := range existingBySubID {
+				if ep.Status != "deleted" && ep.Status != "failed" {
+					log.Printf("[Provision] Provision already exists for subscription=%s (id=%s, status=%s), skipping",
+						req.SubscriptionID, ep.ID, ep.Status)
+					return &models.ProvisionResponse{
+						ResourceID: ep.ID,
+						Status:     ep.Status,
+						Message:    "Provision already exists for this subscription",
+					}, nil
+				}
+			}
+		}
+	}
+
 	// Create hosting provision record
 	provisionID := uuid.New().String()
 	hp := &models.HostingProvision{
