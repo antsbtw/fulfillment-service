@@ -219,8 +219,9 @@ type NodeFailedCallback struct {
 // SubscriptionCallback is sent to subscription-service on status changes (v3.1 简化版)
 type SubscriptionCallback struct {
 	SubscriptionID string `json:"subscription_id" binding:"required"`
-	App            string `json:"app" binding:"required"` // otun, obox
+	App            string `json:"app" binding:"required"`    // otun, obox
 	Status         string `json:"status" binding:"required"` // active, failed, deleted
+	Reason         string `json:"reason,omitempty"`          // 删除原因：user_initiated（用户主动删除VPS）, subscription_cancelled（订阅取消）
 	Error          string `json:"error,omitempty"`
 	Message        string `json:"message,omitempty"`
 }

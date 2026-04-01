@@ -73,6 +73,18 @@ func main() {
 		otunClient,
 	)
 
+	// Initialize CleanupScheduler (后台兜底清理失败的 VPS 实例)
+	cleanupScheduler := service.NewCleanupScheduler(
+		hostingRepo,
+		hostingClient,
+		1*time.Hour,  // 每小时运行一次
+		24*time.Hour, // 清理创建超过 24 小时的失败节点
+	)
+
+	// Start CleanupScheduler in background
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	go cleanupScheduler.Start(cleanupCtx)
+
 	// Initialize HTTP server
 	server := http.NewServer(cfg, pool, provisionService, vpnService, entitlementService)
 
@@ -91,6 +103,7 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+	cleanupCancel() // 停止 CleanupScheduler
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

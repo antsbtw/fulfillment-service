@@ -30,6 +30,9 @@ type HostingProvision struct {
 	TrafficLimit int64
 	TrafficUsed  int64
 
+	// Cleanup tracking
+	NeedsCleanup bool // 标记是否需要后台清理（VPS 创建失败但删除也失败时设置）
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	ReadyAt   *time.Time

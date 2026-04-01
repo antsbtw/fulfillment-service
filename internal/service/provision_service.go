@@ -155,6 +155,14 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 	// Wait for node to be active
 	node, err := s.hostingClient.WaitForNodeReady(ctx, nodeID, 10*time.Minute)
 	if err != nil {
+		// 云实例已创建但未就绪，主动清理避免僵尸实例持续计费
+		log.Printf("[Provision] Node %s failed to become ready, attempting cleanup...", nodeID)
+		if _, cleanupErr := s.hostingClient.DeleteNode(ctx, nodeID); cleanupErr != nil {
+			log.Printf("[Provision] WARN: failed to cleanup node %s after provision failure: %v (will be retried by CleanupScheduler)", nodeID, cleanupErr)
+			s.hostingRepo.MarkNeedsCleanup(ctx, provisionID)
+		} else {
+			log.Printf("[Provision] Successfully cleaned up failed node %s", nodeID)
+		}
 		s.handleProvisionError(ctx, req.SubscriptionID, provisionID, fmt.Sprintf("wait for node ready: %v", err))
 		return
 	}
@@ -266,7 +274,17 @@ func (s *ProvisionService) Deprovision(ctx context.Context, req *models.Deprovis
 	} else {
 		provisions, qErr := s.hostingRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
 		if qErr == nil && len(provisions) > 0 {
-			hp = provisions[0]
+			// 优先查找活跃的 provision（排除已删除/已失败的）
+			for _, p := range provisions {
+				if p.Status != models.StatusDeleted && p.Status != models.StatusFailed {
+					hp = p
+					break
+				}
+			}
+			// 如果没有活跃的，取最近一条
+			if hp == nil {
+				hp = provisions[0]
+			}
 		} else {
 			err = qErr
 		}
@@ -307,12 +325,12 @@ func (s *ProvisionService) deprovisionAsync(hp *models.HostingProvision, reason 
 	s.logRepo.LogAction(ctx, hp.ID, "hosting", "deprovisioned", "deleted",
 		fmt.Sprintf("Resource deprovisioned. Reason: %s", reason))
 
-	// Notify subscription-service
-	if err := s.subscriptionClient.NotifyDeleted(ctx, hp.SubscriptionID, hp.ID); err != nil {
+	// Notify subscription-service（携带 reason，让 subscription-service 区分用户主动删除和订阅取消）
+	if err := s.subscriptionClient.NotifyDeleted(ctx, hp.SubscriptionID, hp.ID, reason); err != nil {
 		log.Printf("[Deprovision] Failed to notify subscription-service (deleted): %v", err)
 	}
 
-	log.Printf("[Deprovision] Resource %s successfully deprovisioned", hp.ID)
+	log.Printf("[Deprovision] Resource %s successfully deprovisioned (reason: %s)", hp.ID, reason)
 }
 
 // GetResourceStatus gets the status of a hosting provision

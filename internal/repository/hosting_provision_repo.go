@@ -26,19 +26,19 @@ func (r *HostingProvisionRepository) Create(ctx context.Context, hp *models.Host
 			id, subscription_id, user_id, channel,
 			hosting_node_id, provider, region,
 			public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			status, error_message, plan_tier, traffic_limit, traffic_used
+			status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7,
 			$8, $9, $10, $11, $12, $13, $14,
-			$15, $16, $17, $18, $19
+			$15, $16, $17, $18, $19, $20
 		)
 	`
 	_, err := r.pool.Exec(ctx, query,
 		hp.ID, hp.SubscriptionID, hp.UserID, hp.Channel,
 		hp.HostingNodeID, hp.Provider, hp.Region,
 		hp.PublicIP, hp.APIPort, hp.APIKey, hp.VlessPort, hp.SSPort, hp.PublicKey, hp.ShortID,
-		hp.Status, hp.ErrorMessage, hp.PlanTier, hp.TrafficLimit, hp.TrafficUsed,
+		hp.Status, hp.ErrorMessage, hp.PlanTier, hp.TrafficLimit, hp.TrafficUsed, hp.NeedsCleanup,
 	)
 	if err != nil {
 		return fmt.Errorf("insert hosting_provision: %w", err)
@@ -51,7 +51,7 @@ func (r *HostingProvisionRepository) GetByID(ctx context.Context, id string) (*m
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE id = $1
@@ -64,7 +64,7 @@ func (r *HostingProvisionRepository) GetBySubscriptionID(ctx context.Context, su
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE subscription_id = $1 AND deleted_at IS NULL
@@ -83,7 +83,7 @@ func (r *HostingProvisionRepository) GetActiveByUser(ctx context.Context, userID
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE user_id = $1
@@ -100,7 +100,7 @@ func (r *HostingProvisionRepository) GetLatestByUser(ctx context.Context, userID
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE user_id = $1
@@ -153,13 +153,64 @@ func (r *HostingProvisionRepository) UpdateStatus(ctx context.Context, id, statu
 	return nil
 }
 
+// MarkNeedsCleanup 标记 provision 需要后台清理（VPS 删除失败时使用）
+func (r *HostingProvisionRepository) MarkNeedsCleanup(ctx context.Context, id string) error {
+	query := `UPDATE fulfillment.hosting_provisions SET needs_cleanup = TRUE, updated_at = NOW() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, query, id)
+	return err
+}
+
+// ClearCleanupFlag 清除清理标记（清理成功后调用）
+func (r *HostingProvisionRepository) ClearCleanupFlag(ctx context.Context, id string) error {
+	query := `UPDATE fulfillment.hosting_provisions SET needs_cleanup = FALSE, updated_at = NOW() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, query, id)
+	return err
+}
+
+// ListNeedsCleanup 获取需要后台清理的 provision 列表
+func (r *HostingProvisionRepository) ListNeedsCleanup(ctx context.Context, limit int) ([]*models.HostingProvision, error) {
+	query := `
+		SELECT id, subscription_id, user_id, channel,
+			   hosting_node_id, provider, region,
+			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   created_at, updated_at, ready_at, deleted_at
+		FROM fulfillment.hosting_provisions
+		WHERE needs_cleanup = TRUE
+		ORDER BY created_at ASC
+		LIMIT $1
+	`
+	rows, err := r.pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query needs_cleanup provisions: %w", err)
+	}
+	defer rows.Close()
+	return r.scanMany(rows)
+}
+
+// GetByHostingNodeID 根据 hosting_node_id 查找 provision
+func (r *HostingProvisionRepository) GetByHostingNodeID(ctx context.Context, hostingNodeID string) (*models.HostingProvision, error) {
+	query := `
+		SELECT id, subscription_id, user_id, channel,
+			   hosting_node_id, provider, region,
+			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   created_at, updated_at, ready_at, deleted_at
+		FROM fulfillment.hosting_provisions
+		WHERE hosting_node_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	return r.scanOne(r.pool.QueryRow(ctx, query, hostingNodeID))
+}
+
 func (r *HostingProvisionRepository) scanOne(row pgx.Row) (*models.HostingProvision, error) {
 	hp := &models.HostingProvision{}
 	err := row.Scan(
 		&hp.ID, &hp.SubscriptionID, &hp.UserID, &hp.Channel,
 		&hp.HostingNodeID, &hp.Provider, &hp.Region,
 		&hp.PublicIP, &hp.APIPort, &hp.APIKey, &hp.VlessPort, &hp.SSPort, &hp.PublicKey, &hp.ShortID,
-		&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed,
+		&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed, &hp.NeedsCleanup,
 		&hp.CreatedAt, &hp.UpdatedAt, &hp.ReadyAt, &hp.DeletedAt,
 	)
 	if err != nil {
@@ -179,7 +230,7 @@ func (r *HostingProvisionRepository) scanMany(rows pgx.Rows) ([]*models.HostingP
 			&hp.ID, &hp.SubscriptionID, &hp.UserID, &hp.Channel,
 			&hp.HostingNodeID, &hp.Provider, &hp.Region,
 			&hp.PublicIP, &hp.APIPort, &hp.APIKey, &hp.VlessPort, &hp.SSPort, &hp.PublicKey, &hp.ShortID,
-			&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed,
+			&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed, &hp.NeedsCleanup,
 			&hp.CreatedAt, &hp.UpdatedAt, &hp.ReadyAt, &hp.DeletedAt,
 		)
 		if err != nil {

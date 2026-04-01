@@ -182,6 +182,53 @@ func (c *HostingClient) DeleteNode(ctx context.Context, nodeID string) (*DeleteN
 	return &result, nil
 }
 
+// FailedNodeInfo represents a failed node from hosting-service
+type FailedNodeInfo struct {
+	NodeID       string `json:"node_id"`
+	Status       string `json:"status"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	CreatedAt    string `json:"created_at"`
+}
+
+// FailedNodesResponse is the response from listing failed nodes
+type FailedNodesResponse struct {
+	Nodes []FailedNodeInfo `json:"nodes"`
+	Total int              `json:"total"`
+}
+
+// ListFailedNodes gets failed nodes older than the specified duration
+func (c *HostingClient) ListFailedNodes(ctx context.Context, olderThan time.Duration) ([]FailedNodeInfo, error) {
+	url := fmt.Sprintf("%s/api/admin/nodes/failed?older_than=%s", c.baseURL, olderThan.String())
+
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-Admin-Key", c.adminKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hosting-service returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result FailedNodesResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	return result.Nodes, nil
+}
+
 // WaitForNodeReady polls until node is active or failed
 func (c *HostingClient) WaitForNodeReady(ctx context.Context, nodeID string, maxWait time.Duration) (*NodeInfo, error) {
 	log.Printf("[HostingClient] Waiting for node %s to be ready (max %v)", nodeID, maxWait)

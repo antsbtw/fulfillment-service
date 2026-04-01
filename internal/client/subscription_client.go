@@ -95,12 +95,13 @@ func (c *SubscriptionClient) NotifyFailed(ctx context.Context, subscriptionID, r
 }
 
 // NotifyDeleted notifies that resource has been deleted
-func (c *SubscriptionClient) NotifyDeleted(ctx context.Context, subscriptionID, resourceID string) error {
-	// Hosting (obox) 资源删除
+// reason 用于区分删除原因：用户主动删除 VPS（"User initiated deletion"）vs 订阅取消（"Subscription cancelled"）
+func (c *SubscriptionClient) NotifyDeleted(ctx context.Context, subscriptionID, resourceID, reason string) error {
 	return c.NotifyResourceStatus(ctx, &models.SubscriptionCallback{
 		SubscriptionID: subscriptionID,
 		App:            "obox",
 		Status:         models.StatusDeleted,
+		Reason:         reason,
 		Message:        fmt.Sprintf("Resource %s deleted", resourceID),
 	})
 }
