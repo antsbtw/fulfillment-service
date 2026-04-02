@@ -55,6 +55,7 @@ func (s *CleanupScheduler) Start(ctx context.Context) {
 func (s *CleanupScheduler) runCleanupCycle(ctx context.Context) {
 	s.cleanupFailedProvisions(ctx)
 	s.cleanupOrphanedNodes(ctx)
+	s.cleanupOrphanedActiveNodes(ctx)
 }
 
 // cleanupFailedProvisions 清理标记了 needs_cleanup 的失败 provision
@@ -91,6 +92,48 @@ func (s *CleanupScheduler) cleanupFailedProvisions(ctx context.Context) {
 		}
 
 		log.Printf("[CleanupScheduler] Cleaned up orphaned node %s (provision=%s)", p.HostingNodeID, p.ID)
+	}
+}
+
+// cleanupOrphanedActiveNodes 核心对账逻辑：
+// 每个活跃 VPS 必须有一个活跃的 hosting_provision 对应。
+// 找不到对应 provision 的活跃 VPS → 孤立节点 → 自动删除。
+//
+// 这防止了以下场景导致的资源泄漏：
+// - 订阅过期/取消但 deprovision 事件丢失
+// - deprovision 执行失败且重试也失败
+// - 任何导致 VPS 和订阅不一致的 bug
+func (s *CleanupScheduler) cleanupOrphanedActiveNodes(ctx context.Context) {
+	nodes, err := s.hostingClient.ListActiveNodes(ctx)
+	if err != nil {
+		log.Printf("[CleanupScheduler] Failed to list active nodes from hosting-service: %v", err)
+		return
+	}
+
+	if len(nodes) == 0 {
+		return
+	}
+
+	orphanCount := 0
+	for _, node := range nodes {
+		provision, _ := s.hostingRepo.GetByHostingNodeID(ctx, node.NodeID)
+		if provision != nil && (provision.Status == "active" || provision.Status == "creating" || provision.Status == "pending" || provision.Status == "running" || provision.Status == "installing") {
+			continue // 有活跃的 provision 对应，正常
+		}
+
+		// 孤立节点：VPS 在运行但没有活跃的 provision
+		orphanCount++
+		log.Printf("[CleanupScheduler] ORPHAN DETECTED: node %s (status=active) has no active provision, deleting...", node.NodeID)
+
+		if _, err := s.hostingClient.DeleteNode(ctx, node.NodeID); err != nil {
+			log.Printf("[CleanupScheduler] Failed to delete orphaned active node %s: %v", node.NodeID, err)
+		} else {
+			log.Printf("[CleanupScheduler] Deleted orphaned active node %s", node.NodeID)
+		}
+	}
+
+	if orphanCount > 0 {
+		log.Printf("[CleanupScheduler] Cleaned up %d orphaned active nodes out of %d total active nodes", orphanCount, len(nodes))
 	}
 }
 
