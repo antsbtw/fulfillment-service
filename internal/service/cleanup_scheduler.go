@@ -104,7 +104,7 @@ func (s *CleanupScheduler) cleanupFailedProvisions(ctx context.Context) {
 // - deprovision 执行失败且重试也失败
 // - 任何导致 VPS 和订阅不一致的 bug
 func (s *CleanupScheduler) cleanupOrphanedActiveNodes(ctx context.Context) {
-	nodes, err := s.hostingClient.ListActiveNodes(ctx)
+	nodes, err := s.hostingClient.ListActiveOBoxNodes(ctx)
 	if err != nil {
 		log.Printf("[CleanupScheduler] Failed to list active nodes from hosting-service: %v", err)
 		return

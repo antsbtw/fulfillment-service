@@ -229,9 +229,10 @@ func (c *HostingClient) ListFailedNodes(ctx context.Context, olderThan time.Dura
 	return result.Nodes, nil
 }
 
-// ListActiveNodes gets all active nodes from hosting-service
-func (c *HostingClient) ListActiveNodes(ctx context.Context) ([]FailedNodeInfo, error) {
-	url := fmt.Sprintf("%s/api/admin/nodes?status=active", c.baseURL)
+// ListActiveOBoxNodes gets all active OBox nodes from hosting-service
+// 只查 purpose=obox 的节点，避免误删 OTun VPN 共享节点
+func (c *HostingClient) ListActiveOBoxNodes(ctx context.Context) ([]FailedNodeInfo, error) {
+	url := fmt.Sprintf("%s/api/admin/nodes?status=active&purpose=obox", c.baseURL)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
