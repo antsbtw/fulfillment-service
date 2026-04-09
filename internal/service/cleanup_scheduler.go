@@ -121,6 +121,16 @@ func (s *CleanupScheduler) cleanupOrphanedActiveNodes(ctx context.Context) {
 			continue // 有活跃的 provision 对应，正常
 		}
 
+		// 防止竞态：新节点刚创建但 provision 记录尚未关联 HostingNodeID，
+		// 跳过创建时间不足 failedNodeAge 的节点，给 provisionAsync 留出窗口
+		if nodeCreatedAt, err := time.Parse(time.RFC3339, node.CreatedAt); err == nil {
+			if time.Since(nodeCreatedAt) < s.failedNodeAge {
+				log.Printf("[CleanupScheduler] Skipping young orphan node %s (age=%v < %v), may still be provisioning",
+					node.NodeID, time.Since(nodeCreatedAt).Round(time.Second), s.failedNodeAge)
+				continue
+			}
+		}
+
 		// 孤立节点：VPS 在运行但没有活跃的 provision
 		orphanCount++
 		log.Printf("[CleanupScheduler] ORPHAN DETECTED: node %s (status=active) has no active provision, deleting...", node.NodeID)
