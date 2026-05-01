@@ -126,12 +126,16 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 	bundleID := s.getBundleID(req.PlanTier)
 
 	// Call obox-hosting-service to create node
+	// SourceRequestID 透传 fulfillment.hosting_provisions.id（= provisionID），
+	// hosting-service 会把它打到 AWS 实例 tag 上（HOSTING_DELETE_SILENT_FAILURE.md §5.1.D），
+	// 用于三方对账反查（OBOX_MANAGER_DESIGN.md §15）。
 	createReq := &client.CreateNodeRequest{
-		CloudProvider:  s.cfg.Hosting.CloudProvider,
-		Region:         region,
-		BundleID:       bundleID,
-		SubscriptionID: req.SubscriptionID,
-		UserID:         req.UserID,
+		CloudProvider:   s.cfg.Hosting.CloudProvider,
+		Region:          region,
+		BundleID:        bundleID,
+		SubscriptionID:  req.SubscriptionID,
+		UserID:          req.UserID,
+		SourceRequestID: provisionID,
 	}
 
 	createResp, err := s.hostingClient.CreateNode(ctx, createReq)
@@ -304,6 +308,14 @@ func (s *ProvisionService) Deprovision(ctx context.Context, req *models.Deprovis
 }
 
 // deprovisionAsync handles the actual deprovisioning in the background
+//
+// 关键不变量（详见 backend-v3/document/architecture/HOSTING_DELETE_SILENT_FAILURE.md §5.1.B）：
+// hosting-service.DeleteNode 失败时，绝对不能把 hp.Status=deleted / hp.DeletedAt 设上，
+// 否则后续调用方（含 obox-manager）会以为删除成功，AWS 端的孤儿就再也对不上账。
+// 失败路径必须：
+//   1. 标 needs_cleanup=TRUE，由 cleanupFailedProvisions cron 周期重试；
+//   2. provision_logs 写一条 deprovision_aws_failed 审计；
+//   3. 不通知 subscription-service "deleted"（因为还没真的删）。
 func (s *ProvisionService) deprovisionAsync(hp *models.HostingProvision, reason string) {
 	ctx := context.Background()
 
@@ -313,7 +325,20 @@ func (s *ProvisionService) deprovisionAsync(hp *models.HostingProvision, reason 
 	if hp.HostingNodeID != "" {
 		_, err := s.hostingClient.DeleteNode(ctx, hp.HostingNodeID)
 		if err != nil {
-			log.Printf("[Deprovision] Warning: failed to delete node: %v", err)
+			log.Printf("[Deprovision] DeleteNode failed for %s: %v, marking needs_cleanup", hp.ID, err)
+
+			// 标 needs_cleanup，由 CleanupScheduler.cleanupFailedProvisions 周期重试
+			if cleanupErr := s.hostingRepo.MarkNeedsCleanup(ctx, hp.ID); cleanupErr != nil {
+				log.Printf("[Deprovision] Warning: failed to mark needs_cleanup for %s: %v", hp.ID, cleanupErr)
+			}
+
+			// 写 provision_logs 审计
+			s.logRepo.LogAction(ctx, hp.ID, "hosting", "deprovision_aws_failed", "failed",
+				fmt.Sprintf("hosting.DeleteNode failed (reason=%s): %v", reason, err))
+
+			// 状态回滚到 active（保留这条 provision，不让它消失），由后台兜底重试
+			s.updateStatus(ctx, hp.ID, models.StatusActive, nil)
+			return
 		}
 	}
 
@@ -560,7 +585,16 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 		case models.StatusFailed:
 			log.Printf("[CreateUserNode] Auto-cleaning failed node: resource_id=%s", existing.ID)
 			if err := s.cleanupFailedProvision(ctx, existing); err != nil {
-				log.Printf("[CreateUserNode] Warning: failed to cleanup failed node: %v", err)
+				// 关键：旧的 AWS 实例可能还在跑，绝不能放行新建（否则用户会被双重计费）。
+				// cleanup 已经标了 needs_cleanup，由 CleanupScheduler 重试；用户重试请求时
+				// 旧 row 状态会变为 deleted，幂等检查就会放行。
+				// 见 HOSTING_DELETE_SILENT_FAILURE.md §5.1.B（cleanupFailedProvision 行为变更）。
+				log.Printf("[CreateUserNode] Cleanup of failed node not complete: %v", err)
+				return &models.CreateNodeResponse{
+					Success: false,
+					Status:  "cleanup_pending",
+					Message: "A previous failed node is being cleaned up. Please retry in a few minutes.",
+				}, nil
 			}
 		}
 	}
@@ -724,13 +758,28 @@ func (s *ProvisionService) hostingToStatusResponse(hp *models.HostingProvision) 
 	return resp
 }
 
+// cleanupFailedProvision 清理一条已失败的旧 provision，让用户能重新创建
+//
+// 同 deprovisionAsync 的不变量（详见 HOSTING_DELETE_SILENT_FAILURE.md §5.1.B）：
+// 云端删除失败时不能伪装成功标 deleted_at，否则一条错误的 provision 会从对账视野中消失。
+// 失败时返回错误让调用方知道，并用 needs_cleanup 排队后台重试。
 func (s *ProvisionService) cleanupFailedProvision(ctx context.Context, hp *models.HostingProvision) error {
 	log.Printf("[cleanupFailedProvision] Cleaning up failed provision: id=%s, user=%s", hp.ID, hp.UserID)
 
 	if hp.HostingNodeID != "" {
 		log.Printf("[cleanupFailedProvision] Attempting to cleanup external resource: %s", hp.HostingNodeID)
 		if _, err := s.hostingClient.DeleteNode(ctx, hp.HostingNodeID); err != nil {
-			log.Printf("[cleanupFailedProvision] Warning: failed to delete external resource: %v", err)
+			log.Printf("[cleanupFailedProvision] DeleteNode failed for %s: %v, marking needs_cleanup", hp.ID, err)
+
+			if cleanupErr := s.hostingRepo.MarkNeedsCleanup(ctx, hp.ID); cleanupErr != nil {
+				log.Printf("[cleanupFailedProvision] Warning: failed to mark needs_cleanup for %s: %v", hp.ID, cleanupErr)
+			}
+			s.logRepo.LogAction(ctx, hp.ID, "hosting", "deprovision_aws_failed", "failed",
+				fmt.Sprintf("hosting.DeleteNode failed during auto_cleanup: %v", err))
+
+			// 关键：返回错误，让上游（ProvisionResource 的幂等检查路径）知道这条没真清，
+			// 不可放行新建（否则会出现"幂等检查放行 + AWS 端旧实例还在"的双重计费）
+			return fmt.Errorf("cleanup failed (queued for retry): %w", err)
 		}
 	}
 
