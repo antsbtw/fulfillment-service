@@ -73,6 +73,7 @@ type ServicesConfig struct {
 	SubscriptionServiceURL string
 	LicenseServiceURL      string
 	OTunManagerURL         string
+	OBoxManagerURL         string
 }
 
 func Load() *Config {
@@ -111,6 +112,7 @@ func Load() *Config {
 			SubscriptionServiceURL: getEnv("SUBSCRIPTION_SERVICE_URL", "http://localhost:8012"),
 			LicenseServiceURL:      getEnv("LICENSE_SERVICE_URL", "http://localhost:8004"),
 			OTunManagerURL:         getEnv("OTUN_MANAGER_URL", "http://localhost:8022"),
+			OBoxManagerURL:         getEnv("OBOX_MANAGER_URL", "http://localhost:8024"),
 		},
 		InternalSecret: getEnv("INTERNAL_SECRET", ""),
 		Trial: TrialConfig{

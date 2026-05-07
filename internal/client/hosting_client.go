@@ -37,6 +37,7 @@ type CreateNodeRequest struct {
 	SubscriptionID  string `json:"subscription_id,omitempty"`   // 对账单 ID（hosting-service 要求 fulfillment 必填）
 	UserID          string `json:"user_id,omitempty"`           // 用户 ID（hosting-service 要求 fulfillment 必填）
 	SourceRequestID string `json:"source_request_id,omitempty"` // fulfillment.hosting_provisions.id, hosting 用于打 ProvisionID tag
+	TrafficLimit    int64  `json:"traffic_limit,omitempty"`     // OBox plan traffic limit in bytes
 }
 
 // CreateNodeResponse is the response from creating a node
@@ -181,6 +182,37 @@ func (c *HostingClient) DeleteNode(ctx context.Context, nodeID string) (*DeleteN
 
 	log.Printf("[HostingClient] Node deleted: %s", nodeID)
 	return &result, nil
+}
+
+func (c *HostingClient) SuspendNode(ctx context.Context, nodeID string) error {
+	log.Printf("[HostingClient] Suspending node: %s", nodeID)
+
+	body := bytes.NewReader([]byte(`{"reason":"traffic_exceeded"}`))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/admin/nodes/"+nodeID+"/suspend", body)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("X-Admin-Key", c.adminKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hosting-service returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[HostingClient] Node suspended: %s", nodeID)
+	return nil
 }
 
 // FailedNodeInfo represents a failed node from hosting-service

@@ -69,6 +69,38 @@ func (h *Handler) Deprovision(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+func (h *Handler) DeprovisionOBox(c *gin.Context) {
+	var req models.OBoxDeprovisionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.provisionService.DeprovisionOBox(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, resp)
+}
+
+func (h *Handler) SuspendOBox(c *gin.Context) {
+	var req models.OBoxSuspendRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.provisionService.SuspendOBox(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, resp)
+}
+
 // GetResourceStatus gets resource status by ID
 func (h *Handler) GetResourceStatus(c *gin.Context) {
 	resourceID := c.Param("id")

@@ -48,6 +48,7 @@ func main() {
 	)
 
 	otunClient := client.NewOTunClient(cfg.Services.OTunManagerURL, cfg.InternalSecret)
+	oboxClient := client.NewOBoxClient(cfg.Services.OBoxManagerURL, cfg.InternalSecret)
 
 	// Initialize services
 	provisionService := service.NewProvisionService(
@@ -57,6 +58,7 @@ func main() {
 		logRepo,
 		hostingClient,
 		subscriptionClient,
+		oboxClient,
 	)
 
 	vpnService := service.NewVPNService(

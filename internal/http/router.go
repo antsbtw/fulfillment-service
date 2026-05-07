@@ -127,6 +127,8 @@ func (s *Server) setupRoutes() {
 		// Provisioning
 		internal.POST("/provision", s.handler.Provision)
 		internal.POST("/deprovision", s.handler.Deprovision)
+		internal.POST("/obox/deprovision", s.handler.DeprovisionOBox)
+		internal.POST("/obox/suspend", s.handler.SuspendOBox)
 
 		// Resource status queries
 		internal.GET("/resources/:id", s.handler.GetResourceStatus)

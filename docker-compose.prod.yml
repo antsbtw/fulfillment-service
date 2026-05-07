@@ -29,6 +29,8 @@ services:
       SUBSCRIPTION_SERVICE_URL: http://localhost:8012
       LICENSE_SERVICE_URL: http://localhost:8004
       OTUN_MANAGER_URL: http://localhost:8022
+      # OBox manager (V1 dual-write; nil-safe — fulfillment skips obox calls if URL empty)
+      OBOX_MANAGER_URL: http://localhost:8024
       # Trial Configuration
       TRIAL_ENABLED: ${TRIAL_ENABLED:-true}
       TRIAL_DURATION_HOURS: ${TRIAL_DURATION_HOURS:-1}

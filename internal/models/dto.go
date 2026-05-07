@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // ==================== Internal API DTOs ====================
 
 // ProvisionRequest is sent by subscription-service to create a resource
@@ -25,6 +27,15 @@ type ProvisionRequest struct {
 	ProductID    string `json:"product_id,omitempty"`
 	PurchaseType string `json:"purchase_type,omitempty"` // subscription, one_time
 
+	ChannelSubID string     `json:"channel_sub_id,omitempty"`
+	ChannelTxID  string     `json:"channel_tx_id,omitempty"`
+	PeriodStart  *time.Time `json:"period_start,omitempty"`
+	PeriodEnd    *time.Time `json:"period_end,omitempty"`
+	Amount       int64      `json:"amount,omitempty"`
+	Currency     string     `json:"currency,omitempty"`
+	Quantity     int        `json:"quantity,omitempty"`
+	Months       int        `json:"months,omitempty"`
+
 	// Trial-specific
 	DeviceID string `json:"device_id,omitempty"`
 }
@@ -43,6 +54,20 @@ type DeprovisionRequest struct {
 	SubscriptionID string `json:"subscription_id" binding:"required"`
 	ResourceID     string `json:"resource_id"`
 	Reason         string `json:"reason"`
+}
+
+type OBoxDeprovisionRequest struct {
+	UserID string `json:"user_id" binding:"required"`
+	VPSID  string `json:"vps_id" binding:"required"`
+	Reason string `json:"reason"`
+}
+
+type OBoxSuspendRequest struct {
+	UserID       string `json:"user_id" binding:"required"`
+	VPSID        string `json:"vps_id" binding:"required"`
+	Reason       string `json:"reason"`
+	TrafficUsed  int64  `json:"traffic_used"`
+	TrafficLimit int64  `json:"traffic_limit"`
 }
 
 // DeprovisionResponse is returned after starting deprovisioning

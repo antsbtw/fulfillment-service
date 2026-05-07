@@ -21,6 +21,7 @@ type ProvisionService struct {
 	logRepo            *repository.LogRepository
 	hostingClient      *client.HostingClient
 	subscriptionClient *client.SubscriptionClient
+	oboxClient         *client.OBoxClient
 }
 
 // NewProvisionService creates a new provision service
@@ -31,6 +32,7 @@ func NewProvisionService(
 	logRepo *repository.LogRepository,
 	hostingClient *client.HostingClient,
 	subscriptionClient *client.SubscriptionClient,
+	oboxClient *client.OBoxClient,
 ) *ProvisionService {
 	return &ProvisionService{
 		cfg:                cfg,
@@ -39,6 +41,7 @@ func NewProvisionService(
 		logRepo:            logRepo,
 		hostingClient:      hostingClient,
 		subscriptionClient: subscriptionClient,
+		oboxClient:         oboxClient,
 	}
 }
 
@@ -53,10 +56,53 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		region = s.cfg.Hosting.DefaultRegion
 	}
 
+	trafficLimit := req.TrafficLimit
+	if trafficLimit <= 0 {
+		trafficLimit = s.getTrafficLimit(req.PlanTier)
+		req.TrafficLimit = trafficLimit
+	}
+
 	// Check if user already has an active hosting node
 	existing, err := s.hostingRepo.GetActiveByUser(ctx, req.UserID)
 	if err == nil && existing != nil {
-		return nil, fmt.Errorf("user already has an active hosting_node resource")
+		if existing.PlanTier != "" && req.PlanTier != "" && existing.PlanTier != req.PlanTier {
+			log.Printf("[Provision] Plan tier changed for user=%s: %s -> %s, rebuilding node", req.UserID, existing.PlanTier, req.PlanTier)
+			if existing.HostingNodeID != "" {
+				if _, err := s.hostingClient.DeleteNode(ctx, existing.HostingNodeID); err != nil {
+					s.hostingRepo.MarkNeedsCleanup(ctx, existing.ID)
+					s.logRepo.LogAction(ctx, existing.ID, "hosting", "deprovision_aws_failed", "failed",
+						fmt.Sprintf("hosting.DeleteNode failed during plan change: %v", err))
+					return nil, fmt.Errorf("delete existing node for plan change: %w", err)
+				}
+			}
+			now := time.Now()
+			existing.Status = models.StatusDeleted
+			existing.DeletedAt = &now
+			if err := s.hostingRepo.Update(ctx, existing); err != nil {
+				return nil, fmt.Errorf("mark old provision deleted for plan change: %w", err)
+			}
+			if s.oboxClient != nil {
+				if err := s.oboxClient.DeleteInstance(ctx, req.UserID); err != nil {
+					log.Printf("[Provision] Failed to delete old obox-manager row during plan change: %v", err)
+				}
+			}
+		} else {
+			if s.oboxClient != nil {
+				readyAt := time.Now()
+				if existing.ReadyAt != nil {
+					readyAt = *existing.ReadyAt
+				}
+				if err := s.renewOBoxInstance(ctx, req, existing, existing.HostingNodeID, readyAt); err != nil {
+					return nil, fmt.Errorf("renew obox-manager instance: %w", err)
+				}
+				return &models.ProvisionResponse{
+					ResourceID: existing.ID,
+					Status:     existing.Status,
+					Message:    "Existing hosting node renewed in obox-manager",
+				}, nil
+			}
+			return nil, fmt.Errorf("user already has an active hosting_node resource")
+		}
 	}
 
 	// 幂等检查：同一个 subscription_id 不重复创建
@@ -88,7 +134,7 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		Region:         region,
 		Status:         models.StatusPending,
 		PlanTier:       req.PlanTier,
-		TrafficLimit:   req.TrafficLimit,
+		TrafficLimit:   trafficLimit,
 	}
 
 	if err := s.hostingRepo.Create(ctx, hp); err != nil {
@@ -136,6 +182,7 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 		SubscriptionID:  req.SubscriptionID,
 		UserID:          req.UserID,
 		SourceRequestID: provisionID,
+		TrafficLimit:    req.TrafficLimit,
 	}
 
 	createResp, err := s.hostingClient.CreateNode(ctx, createReq)
@@ -171,14 +218,16 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 		return
 	}
 
-	// Update hosting provision with node information
+	// Update hosting provision with node information.
+	// `now` is declared at outer scope so the obox renew call below can reuse it
+	// as the period anchor (consistent ready_at and obox_instance.updated_at).
+	now := time.Now()
 	hp, _ = s.hostingRepo.GetByID(ctx, provisionID)
 	if hp != nil {
 		publicIP := node.PublicIP
 		apiKey := node.NodeAPIKey
 		publicKey := node.PublicKey
 		shortID := node.ShortID
-		now := time.Now()
 
 		hp.PublicIP = &publicIP
 		hp.APIPort = s.cfg.Node.APIPort
@@ -208,6 +257,12 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 	}
 	if err := s.subscriptionClient.NotifyActive(ctx, req.SubscriptionID, provisionID, callback); err != nil {
 		log.Printf("[Provision] Failed to notify subscription-service (active): %v", err)
+	}
+
+	if s.oboxClient != nil && hp != nil {
+		if err := s.renewOBoxInstance(ctx, req, hp, node.NodeID, now); err != nil {
+			log.Printf("[Provision] Failed to renew obox-manager instance: %v", err)
+		}
 	}
 
 	log.Printf("[Provision] Resource %s provisioning complete! Node active at %s", provisionID, node.PublicIP)
@@ -355,7 +410,174 @@ func (s *ProvisionService) deprovisionAsync(hp *models.HostingProvision, reason 
 		log.Printf("[Deprovision] Failed to notify subscription-service (deleted): %v", err)
 	}
 
+	if s.oboxClient != nil {
+		if err := s.oboxClient.DeleteInstance(ctx, hp.UserID); err != nil {
+			log.Printf("[Deprovision] Failed to delete obox-manager instance for user %s: %v", hp.UserID, err)
+		}
+	}
+
 	log.Printf("[Deprovision] Resource %s successfully deprovisioned (reason: %s)", hp.ID, reason)
+}
+
+func (s *ProvisionService) DeprovisionOBox(ctx context.Context, req *models.OBoxDeprovisionRequest) (*models.DeprovisionResponse, error) {
+	reason := req.Reason
+	if reason == "" {
+		reason = "expired"
+	}
+
+	if s.oboxClient != nil && reason == "expired" {
+		inst, err := s.oboxClient.GetInstance(ctx, req.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("confirm obox instance before deprovision: %w", err)
+		}
+		if inst == nil {
+			return &models.DeprovisionResponse{
+				ResourceID: req.VPSID,
+				Status:     models.StatusDeleted,
+				Message:    "obox instance already missing",
+			}, nil
+		}
+		if inst.ExpireAt.After(time.Now()) {
+			return &models.DeprovisionResponse{
+				ResourceID: req.VPSID,
+				Status:     models.StatusActive,
+				Message:    "deprovision skipped because instance has been renewed",
+			}, nil
+		}
+	}
+
+	hp, err := s.hostingRepo.GetByHostingNodeID(ctx, req.VPSID)
+	if err != nil || hp == nil {
+		hp, err = s.hostingRepo.GetActiveByUser(ctx, req.UserID)
+	}
+	if err != nil || hp == nil {
+		return nil, fmt.Errorf("hosting provision not found")
+	}
+
+	go s.deprovisionAsync(hp, reason)
+
+	return &models.DeprovisionResponse{
+		ResourceID: hp.ID,
+		Status:     models.StatusStopping,
+		Message:    "OBox deprovisioning scheduled",
+	}, nil
+}
+
+func (s *ProvisionService) SuspendOBox(ctx context.Context, req *models.OBoxSuspendRequest) (*models.DeprovisionResponse, error) {
+	reason := req.Reason
+	if reason == "" {
+		reason = "traffic_exceeded"
+	}
+
+	hp, err := s.hostingRepo.GetByHostingNodeID(ctx, req.VPSID)
+	if err != nil || hp == nil {
+		hp, err = s.hostingRepo.GetActiveByUser(ctx, req.UserID)
+	}
+	if err != nil || hp == nil {
+		return nil, fmt.Errorf("hosting provision not found")
+	}
+	if hp.HostingNodeID == "" {
+		return nil, fmt.Errorf("hosting node id is empty")
+	}
+
+	if err := s.hostingClient.SuspendNode(ctx, hp.HostingNodeID); err != nil {
+		s.logRepo.LogAction(ctx, hp.ID, "hosting", "traffic_suspend_failed", "failed",
+			fmt.Sprintf("hosting.SuspendNode failed (reason=%s traffic=%d/%d): %v", reason, req.TrafficUsed, req.TrafficLimit, err))
+		return nil, err
+	}
+
+	s.logRepo.LogAction(ctx, hp.ID, "hosting", "traffic_suspended", "success",
+		fmt.Sprintf("Node suspended by obox-manager (reason=%s traffic=%d/%d)", reason, req.TrafficUsed, req.TrafficLimit))
+
+	return &models.DeprovisionResponse{
+		ResourceID: hp.ID,
+		Status:     "suspended",
+		Message:    "OBox suspend scheduled",
+	}, nil
+}
+
+func (s *ProvisionService) renewOBoxInstance(ctx context.Context, req *models.ProvisionRequest, hp *models.HostingProvision, nodeID string, readyAt time.Time) error {
+	// All callers gate this with `s.oboxClient != nil`, but defend the function itself
+	// in case future callers forget. Returning nil makes it a silent no-op rather than
+	// blowing up the provision flow when obox-manager is unconfigured.
+	if s.oboxClient == nil {
+		return nil
+	}
+
+	periodStart := readyAt
+	if req.PeriodStart != nil {
+		periodStart = *req.PeriodStart
+	}
+
+	expireAt := periodStart.Add(30 * 24 * time.Hour)
+	if req.PeriodEnd != nil {
+		expireAt = *req.PeriodEnd
+	} else if req.ExpireDays > 0 {
+		expireAt = periodStart.Add(time.Duration(req.ExpireDays) * 24 * time.Hour)
+	}
+
+	quantity := req.Quantity
+	if quantity <= 0 {
+		quantity = 1
+	}
+	months := req.Months
+	if months <= 0 {
+		months = 1
+	}
+
+	purchaseType := req.PurchaseType
+	if purchaseType == "" {
+		purchaseType = "subscription"
+	}
+	channel := req.Channel
+	if channel == "" {
+		channel = hp.Channel
+	}
+	if channel == "" {
+		channel = "stripe"
+	}
+
+	productID := req.ProductID
+	if productID == "" {
+		productID = req.PlanTier
+	}
+
+	var channelSubID *string
+	if req.ChannelSubID != "" {
+		channelSubID = &req.ChannelSubID
+	}
+	var channelTxID *string
+	if req.ChannelTxID != "" {
+		channelTxID = &req.ChannelTxID
+	}
+	var amount *int64
+	if req.Amount > 0 {
+		amount = &req.Amount
+	}
+	var currency *string
+	if req.Currency != "" {
+		currency = &req.Currency
+	}
+
+	return s.oboxClient.Renew(ctx, &client.OBoxRenewRequest{
+		UserID:       req.UserID,
+		VPSID:        nodeID,
+		Channel:      channel,
+		ChannelSubID: channelSubID,
+		ChannelTxID:  channelTxID,
+		ProductID:    productID,
+		PurchaseType: purchaseType,
+		Amount:       amount,
+		Currency:     currency,
+		LastOrderAt:  time.Now(),
+		PlanTier:     req.PlanTier,
+		Quantity:     quantity,
+		Months:       months,
+		TrafficLimit: req.TrafficLimit,
+		StartedAt:    readyAt,
+		PeriodStart:  periodStart,
+		ExpireAt:     expireAt,
+	})
 }
 
 // GetResourceStatus gets the status of a hosting provision
