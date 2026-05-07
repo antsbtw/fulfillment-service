@@ -1005,11 +1005,10 @@ func (s *ProvisionService) cleanupFailedProvision(ctx context.Context, hp *model
 		}
 	}
 
-	now := time.Now()
-	hp.Status = models.StatusDeleted
-	hp.DeletedAt = &now
-
-	if err := s.hostingRepo.Update(ctx, hp); err != nil {
+	// Atomic: status=deleted, deleted_at=now, needs_cleanup=false. Same primitive as
+	// the background cleanup_scheduler success path so behavior is consistent across
+	// "user-driven retry" (here) and "cron-driven cleanup" (CleanupScheduler).
+	if err := s.hostingRepo.MarkCleanedAndDeleted(ctx, hp.ID); err != nil {
 		return fmt.Errorf("failed to mark provision as deleted: %w", err)
 	}
 

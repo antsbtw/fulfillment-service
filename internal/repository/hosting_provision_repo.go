@@ -161,8 +161,29 @@ func (r *HostingProvisionRepository) MarkNeedsCleanup(ctx context.Context, id st
 }
 
 // ClearCleanupFlag 清除清理标记（清理成功后调用）
+//
+// Deprecated: 仅在清理成功但 provision 仍需保持 active 的边角场景使用。常规的
+// "deprovision 失败 → 后台 cleanup 兜底成功" 路径必须用 MarkCleanedAndDeleted，
+// 否则 status 会卡在 active 永远阻塞用户重建（见 HOSTING_DELETE_SILENT_FAILURE.md
+// Bug #4 后续: 047df1f 修复"疯狂重建"后暴露的反向问题）。
 func (r *HostingProvisionRepository) ClearCleanupFlag(ctx context.Context, id string) error {
 	query := `UPDATE fulfillment.hosting_provisions SET needs_cleanup = FALSE, updated_at = NOW() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, query, id)
+	return err
+}
+
+// MarkCleanedAndDeleted 后台 cleanup 成功后调用：原子地清除 needs_cleanup、把 status 设为
+// deleted、设 deleted_at=now()。这样 GetActiveByUser 不会再把这条 row 当成"还活着的资源"，
+// 用户能正常重建。
+func (r *HostingProvisionRepository) MarkCleanedAndDeleted(ctx context.Context, id string) error {
+	query := `
+		UPDATE fulfillment.hosting_provisions
+		SET needs_cleanup = FALSE,
+		    status = 'deleted',
+		    deleted_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`
 	_, err := r.pool.Exec(ctx, query, id)
 	return err
 }

@@ -75,9 +75,10 @@ func (s *CleanupScheduler) cleanupFailedProvisions(ctx context.Context) {
 
 	for _, p := range provisions {
 		if p.HostingNodeID == "" {
-			// 没有 hosting_node_id，无需清理云资源，直接清除标记
-			if err := s.hostingRepo.ClearCleanupFlag(ctx, p.ID); err != nil {
-				log.Printf("[CleanupScheduler] Failed to clear flag for %s: %v", p.ID, err)
+			// No cloud resource was ever attached — mark deleted so the row stops
+			// counting as an "active hosting node" and unblocks user recreate.
+			if err := s.hostingRepo.MarkCleanedAndDeleted(ctx, p.ID); err != nil {
+				log.Printf("[CleanupScheduler] Failed to mark deleted (no node) for %s: %v", p.ID, err)
 			}
 			continue
 		}
@@ -87,8 +88,12 @@ func (s *CleanupScheduler) cleanupFailedProvisions(ctx context.Context) {
 			continue
 		}
 
-		if err := s.hostingRepo.ClearCleanupFlag(ctx, p.ID); err != nil {
-			log.Printf("[CleanupScheduler] Failed to clear flag for %s: %v", p.ID, err)
+		// Cleanup succeeded — mark deleted (status=deleted, deleted_at=now, needs_cleanup=false)
+		// so GetActiveByUser stops returning this row. Without this, a user whose deprovision
+		// failed once and then succeeded via cron would be permanently blocked from
+		// recreating with "user already has an active hosting_node resource".
+		if err := s.hostingRepo.MarkCleanedAndDeleted(ctx, p.ID); err != nil {
+			log.Printf("[CleanupScheduler] Failed to mark deleted for %s: %v", p.ID, err)
 		}
 
 		log.Printf("[CleanupScheduler] Cleaned up orphaned node %s (provision=%s)", p.HostingNodeID, p.ID)
