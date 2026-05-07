@@ -135,6 +135,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 				TrafficUsed:    0,
 				ExpireAt:       &newExpireAt,
 				Email:          req.UserEmail,
+				DeviceID:       req.DeviceID,
 				IsCurrent:      true,
 			}
 			if err := s.vpnRepo.Create(ctx, newVP); err != nil {
@@ -239,6 +240,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		TrafficUsed:    0,
 		ExpireAt:       &expireAt,
 		Email:          req.UserEmail,
+		DeviceID:       req.DeviceID,
 		IsCurrent:      true,
 	}
 
