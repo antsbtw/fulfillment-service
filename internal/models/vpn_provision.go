@@ -72,6 +72,12 @@ func MapPlanToServiceTier(planTier string) string {
 		return ServiceTierPremium
 	case "unlimited":
 		return ServiceTierPremium
+	case "residential":
+		// 私宅IP套餐 → residential 服务等级。
+		// otun-manager 据此把用户开通为 residential，并触发 realm 默认出口分配
+		// （EnsureDefaultAssignment）。漏掉此 case 会让 residential 被静默降级为
+		// standard，realm 链路在上游即断。与 otun-manager MapPlanTierToNodeTier 一致。
+		return ServiceTierResidential
 	default:
 		return ServiceTierStandard
 	}
