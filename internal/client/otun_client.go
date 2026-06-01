@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -65,18 +66,18 @@ type UpdateVPNUserRequest struct {
 
 // VPNUserInfo contains VPN user details
 type VPNUserInfo struct {
-	UUID          string  `json:"uuid"`
-	Email         string  `json:"email,omitempty"`
-	ExternalID    string  `json:"external_id,omitempty"`
+	UUID          string   `json:"uuid"`
+	Email         string   `json:"email,omitempty"`
+	ExternalID    string   `json:"external_id,omitempty"`
 	Protocols     []string `json:"protocols"`
-	TrafficLimit  int64   `json:"traffic_limit"`
-	TrafficUsed   int64   `json:"traffic_used"`
-	ExpireAt      string  `json:"expire_at"`
-	Enabled       bool    `json:"enabled"`
-	PrimaryNodeID *string `json:"primary_node_id,omitempty"`
-	BackupNodeID  *string `json:"backup_node_id,omitempty"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
+	TrafficLimit  int64    `json:"traffic_limit"`
+	TrafficUsed   int64    `json:"traffic_used"`
+	ExpireAt      string   `json:"expire_at"`
+	Enabled       bool     `json:"enabled"`
+	PrimaryNodeID *string  `json:"primary_node_id,omitempty"`
+	BackupNodeID  *string  `json:"backup_node_id,omitempty"`
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
 }
 
 // SubscribeRequest is the request for subscribe endpoint
@@ -371,5 +372,50 @@ func (c *OTunClient) GetUserStats(ctx context.Context, uuid string) (*VPNUserInf
 		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
 	}
 
+	return &result, nil
+}
+
+// RealmConnectURLResponse 是 otun-manager realm connect-url 接口的响应。
+type RealmConnectURLResponse struct {
+	OK         bool   `json:"ok"`
+	EgressID   string `json:"egress_id"`
+	ConnectURL string `json:"connect_url"`
+}
+
+// GetRealmConnectURL 取 residential 用户【当前出口】的 realm 连接 URL（hysteria2-realm://...）。
+// 调 otun-manager 的 GET /api/v1/internal/realm/connect-url?user_uuid=（走 X-Internal-Secret）。
+// userUUID 必须是 otun VPN users.uuid（= vpn_provision.OtunUUID），不是 auth uuid。
+func (c *OTunClient) GetRealmConnectURL(ctx context.Context, userUUID string) (*RealmConnectURLResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET",
+		c.baseURL+"/api/v1/internal/realm/connect-url?user_uuid="+url.QueryEscape(userUUID), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	// 未分配出口（404 no_assignment）等视为"暂无 realm URL"，返回 nil 让调用方降级，不报错中断。
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("otun-manager realm connect-url status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result RealmConnectURLResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+	}
 	return &result, nil
 }

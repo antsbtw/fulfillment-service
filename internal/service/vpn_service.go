@@ -490,22 +490,49 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 	// Use auth UUID as device_id
 	deviceID := userID
 
-	subscribeReq := &client.SubscribeRequest{
-		DeviceID: deviceID,
-	}
-
-	config, err := s.otunClient.GetSubscribeConfig(ctx, subscribeReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get VPN config from otun-manager: %w", err)
-	}
-
 	var protocols []models.VPNProtocol
-	for _, p := range config.Protocols {
+	var expireAt string
+
+	if vp.ServiceTier == models.ServiceTierResidential {
+		// residential 套餐：只返回该套餐自己的 realm 连接 URL（hysteria2-realm://...），
+		// 不返标准节点协议。前端解析这一条 url 即可，与解析标准套餐 url 同一流程，无需感知 realm。
+		// URL 由 otun-manager 按用户【当前出口】生成（GET /api/v1/internal/realm/connect-url）。
+		if vp.OtunUUID == nil || *vp.OtunUUID == "" {
+			return nil, fmt.Errorf("residential user has no otun uuid")
+		}
+		realmResp, rerr := s.otunClient.GetRealmConnectURL(ctx, *vp.OtunUUID)
+		if rerr != nil {
+			return nil, fmt.Errorf("failed to get realm connect-url from otun-manager: %w", rerr)
+		}
+		if realmResp == nil || realmResp.ConnectURL == "" {
+			// manager 未配默认出口 / 用户未分配出口。
+			return nil, fmt.Errorf("no realm egress assigned for residential user")
+		}
 		protocols = append(protocols, models.VPNProtocol{
-			Protocol: p.Protocol,
-			URL:      p.URL,
-			Node:     p.Node,
+			Protocol: "hysteria2-realm",
+			URL:      realmResp.ConnectURL,
+			Node:     realmResp.EgressID,
 		})
+		if vp.ExpireAt != nil {
+			expireAt = vp.ExpireAt.Format(time.RFC3339)
+		}
+	} else {
+		// 标准套餐：原逻辑不变——从 otun-manager /api/subscribe 取节点协议配置。
+		subscribeReq := &client.SubscribeRequest{
+			DeviceID: deviceID,
+		}
+		config, err := s.otunClient.GetSubscribeConfig(ctx, subscribeReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get VPN config from otun-manager: %w", err)
+		}
+		for _, p := range config.Protocols {
+			protocols = append(protocols, models.VPNProtocol{
+				Protocol: p.Protocol,
+				URL:      p.URL,
+				Node:     p.Node,
+			})
+		}
+		expireAt = config.ExpireAt
 	}
 
 	return &models.VPNSubscribeResponse{
@@ -518,7 +545,7 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 		Protocols:    protocols,
 		TrafficLimit: vp.TrafficLimit,
 		TrafficUsed:  vp.TrafficUsed,
-		ExpireAt:     config.ExpireAt,
+		ExpireAt:     expireAt,
 		Message:      "VPN configuration retrieved successfully",
 	}, nil
 }
