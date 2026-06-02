@@ -70,28 +70,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-push
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # 让本 job 的 GITHUB_TOKEN 具备拉取 ghcr 私有镜像的权限（read:packages）。
-    permissions:
-      contents: read
-      packages: read
 
     steps:
     - name: Deploy via SSH
       uses: appleboy/ssh-action@v1
-      env:
-        # CI 自带的临时 GITHUB_TOKEN，传进 SSH 会话用于在生产机登录 ghcr。
-        # 每次运行自动签发、job 结束失效——【永不过期】，根除"手动 token 过期 → denied"。
-        GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        GHCR_USER: ${{ github.actor }}
       with:
         host: ${{ secrets.DEPLOY_HOST }}
         username: ${{ secrets.DEPLOY_USER }}
         key: ${{ secrets.DEPLOY_SSH_KEY }}
-        envs: GHCR_TOKEN,GHCR_USER
+        # 不在 deploy 里 docker login：ghcr 拉取依赖 VPS 上预先用长期 PAT 配好的凭据。
+        # 历史教训：此处曾用临时 GITHUB_TOKEN 登录，会覆盖 VPS 全局 ~/.docker/config.json，
+        # run 结束即失效，导致其他无 login 的服务 deploy 全部 denied。统一不 login。
         script: |
-          set -e
           cd ~/fulfillment-service
           git pull origin main
-          # 用 CI 下发的临时 token 登录 ghcr 后再 pull（不依赖服务器上会过期的手动凭据）。
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
           ./deploy.sh
