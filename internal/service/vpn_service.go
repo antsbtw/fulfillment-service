@@ -626,6 +626,14 @@ func (s *VPNService) calculateTrafficLimit(planTier string, override int64) int6
 		return 200 * GB
 	case "basic":
 		return 50 * GB
+	case "residential":
+		// residential 是多档套餐（100/500/1000GB），流量只能由上游 override 决定
+		// （payment → event.TrafficGB → subscription → req.TrafficLimit）。
+		// 走到这里说明 override 缺失（如礼包/人工开通漏传 traffic），属于配置错误：
+		// 落最小档并告警，避免 default 的 100GB 把高档用户悄悄限流且无任何痕迹。
+		log.Printf("[VPNService] WARNING: residential plan with no traffic override; "+
+			"falling back to smallest tier 100GB — upstream should pass traffic_gb (planTier=%s)", planTier)
+		return 100 * GB
 	default:
 		return 100 * GB
 	}
