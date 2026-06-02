@@ -62,6 +62,9 @@ type UpdateVPNUserRequest struct {
 	ExpireAt     string  `json:"expire_at,omitempty"`
 	Enabled      *bool   `json:"enabled,omitempty"`
 	Email        *string `json:"email,omitempty"`
+	// ServiceTier 套餐升降级（如 standard→residential）才传；空则 manager 保留原值。
+	// 修复：已存在用户升级套餐时 service_tier 不更新 → residential 链在 UpdateUser 路径断。
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
 // VPNUserInfo contains VPN user details

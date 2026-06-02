@@ -105,6 +105,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 			TrafficLimit: trafficLimit,
 			ExpireAt:     expireAt.Format(time.RFC3339),
 			Enabled:      &enabled,
+			ServiceTier:  serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
 		}
 
 		if err := s.otunClient.UpdateUser(ctx, vpnUserID, updateReq); err != nil {
@@ -187,6 +188,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 			TrafficLimit: trafficLimit,
 			ExpireAt:     expireAt.Format(time.RFC3339),
 			Enabled:      &enabled,
+			ServiceTier:  serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
 		}
 		if err := s.otunClient.UpdateUser(ctx, actualVPNUserID, updateReq); err != nil {
 			return nil, fmt.Errorf("failed to update existing VPN user: %w", err)
