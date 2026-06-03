@@ -1,9 +1,11 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wenwu/saas-platform/fulfillment-service/internal/client"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/models"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/service"
 )
@@ -330,6 +332,108 @@ func (h *Handler) GetUserVPNQuickStatus(c *gin.Context) {
 	resp, err := h.vpnService.GetUserVPNQuickStatus(c.Request.Context(), userID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// ==================== Realm 区域选择/切换（internal API，user-portal BFF 调用）====================
+//
+// 这三个 handler 是 BFF realm 链路的下游。约定的对外形态（与 user-portal BFF 一致，§Q4/Q7）：
+//   成功： {"success":true,"data":{...}}（regions: data.egresses；region: data.ok/data.connect_url）
+//   业务级失败：{"success":false,"data":{"ok":false,"error":"<code>","retry_after_sec":N}} + 原始 HTTP 429/409/404
+//   系统级失败：{"success":false,"error":"..."} + 5xx
+// BFF 只需 user_id→注入、原样透传本服务的状态码与 body。
+
+// GetUserRealmRegions 列出用户可选出口（internal，对应 BFF GET /resources/vpn/regions）。
+func (h *Handler) GetUserRealmRegions(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.ListRealmEgresses(c.Request.Context(), userID)
+	if err != nil {
+		// 未订阅 residential / 未开通 → no_assignment（404），前端据此隐藏入口（a+b 兜底）。
+		if errors.Is(err, service.ErrNoRealmAssignment) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"data":    gin.H{"ok": false, "error": "no_assignment"},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// SelectUserRealmRegion 切换用户当前出口（internal，对应 BFF POST /resources/vpn/region）。
+// 请求体 {"egress_id":"..."}；user_id 来自路径（BFF 从 JWT 注入）。
+func (h *Handler) SelectUserRealmRegion(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+
+	var req struct {
+		EgressID string `json:"egress_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "egress_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.SelectRealmEgress(c.Request.Context(), userID, req.EgressID)
+	if err != nil {
+		// 业务级失败：原样透传 manager 的状态码 + error 字符串（switch_rate_limited / egress_offline /
+		// egress_not_found）+ retry_after_sec，供前端按状态码分流与倒计时（§Q7）。
+		var realmErr *client.RealmAPIError
+		if errors.As(err, &realmErr) {
+			data := gin.H{"ok": false, "error": realmErr.Code}
+			if realmErr.RetryAfterSec > 0 {
+				data["retry_after_sec"] = realmErr.RetryAfterSec
+			}
+			c.JSON(realmErr.HTTPStatus, gin.H{"success": false, "data": data})
+			return
+		}
+		// 无 otun_uuid → no_assignment（404）。
+		if errors.Is(err, service.ErrNoRealmAssignment) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"data":    gin.H{"ok": false, "error": "no_assignment"},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// GetUserRealmConnectURL 取用户当前出口连接 URL（internal，对应 BFF GET /resources/vpn/connect-url，可选）。
+func (h *Handler) GetUserRealmConnectURL(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.GetRealmConnectURLForUser(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, service.ErrNoRealmAssignment) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"data":    gin.H{"ok": false, "error": "no_assignment"},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
 		return
 	}
 

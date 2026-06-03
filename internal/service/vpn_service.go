@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -605,6 +606,63 @@ func (s *VPNService) UpdateUserEmail(ctx context.Context, userID, email string) 
 	}
 
 	return nil
+}
+
+// ==================== Realm 区域选择/切换（BFF 链路，§4.5）====================
+//
+// user-portal BFF 只认 auth user_id；otun-manager realm 接口只认 otun users.uuid
+// （= vpn_provisions.OtunUUID）。这层 service 负责 user_id → otun_uuid 解析后再调
+// otun-manager，是这条链路上唯一持有该映射的地方（与 GetUserVPNSubscribeConfig 一致）。
+// 业务级失败（client.RealmAPIError）原样上抛，由 handler 透传原始状态码 + error 字符串给前端。
+
+// ErrNoRealmAssignment 表示该用户没有 realm 分配（未订阅 residential / 未开通），
+// 对应前端 no_assignment（404）。
+var ErrNoRealmAssignment = errors.New("no_assignment")
+
+// ListRealmEgresses 列出用户可选出口（BFF GET /resources/vpn/regions 的下游）。
+// 未开通 otun（无 otun_uuid）的用户视为无分配：返回空列表 + ErrNoRealmAssignment 让 BFF 据此判定。
+func (s *VPNService) ListRealmEgresses(ctx context.Context, userID string) (*client.RealmEgressListResponse, error) {
+	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve otun uuid: %w", err)
+	}
+	if otunUUID == nil || *otunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	return s.otunClient.ListRealmEgresses(ctx, *otunUUID)
+}
+
+// SelectRealmEgress 切换用户当前出口（BFF POST /resources/vpn/region 的下游）。
+// 业务级失败以 *client.RealmAPIError 返回，handler 据此透传状态码。
+func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID string) (*client.RealmSelectResponse, error) {
+	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve otun uuid: %w", err)
+	}
+	if otunUUID == nil || *otunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	return s.otunClient.SelectRealmEgress(ctx, *otunUUID, egressID)
+}
+
+// GetRealmConnectURLForUser 取用户当前出口连接 URL（BFF 可选 GET /resources/vpn/connect-url 的下游）。
+// 无 otun_uuid 或无分配（manager 404）→ ErrNoRealmAssignment。
+func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string) (*client.RealmConnectURLResponse, error) {
+	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve otun uuid: %w", err)
+	}
+	if otunUUID == nil || *otunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	resp, err := s.otunClient.GetRealmConnectURL(ctx, *otunUUID)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil { // manager 404 no_assignment → 已就绪但还没分配出口
+		return nil, ErrNoRealmAssignment
+	}
+	return resp, nil
 }
 
 // Helper functions

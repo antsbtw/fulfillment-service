@@ -422,3 +422,132 @@ func (c *OTunClient) GetRealmConnectURL(ctx context.Context, userUUID string) (*
 	}
 	return &result, nil
 }
+
+// ==================== Realm 区域选择/切换（§4.5，BFF 透传链路）====================
+//
+// 这两个方法是给 user-portal BFF 用的：list 出口 + 切换出口。它们要把
+// otun-manager 的「业务级失败」（switch_rate_limited / egress_offline /
+// no_assignment / egress_not_found）连同原始 HTTP 状态码原样透传上去，
+// 而不是塞进一个泛化的 5xx error 里——前端靠状态码 + error 字符串分流。
+// 因此用 RealmAPIError 承载结构化失败，调用方据此把同样的 body+status 回给前端。
+
+// RealmEgressItem 是面向 App 的安全投影出口项（绝不含 token/sni/stun）。
+type RealmEgressItem struct {
+	EgressID    string `json:"egress_id"`
+	Region      string `json:"region"`
+	DisplayName string `json:"display_name"`
+	Online      bool   `json:"online"`
+	IsCurrent   bool   `json:"is_current"`
+}
+
+// RealmEgressListResponse 对应 manager GET /egresses 的裸响应。
+type RealmEgressListResponse struct {
+	Egresses []RealmEgressItem `json:"egresses"`
+}
+
+// RealmSelectResponse 对应 manager POST /select 的裸响应（成功/失败同结构）。
+type RealmSelectResponse struct {
+	OK            bool   `json:"ok"`
+	ConnectURL    string `json:"connect_url,omitempty"`
+	Error         string `json:"error,omitempty"`
+	RetryAfterSec int    `json:"retry_after_sec,omitempty"`
+}
+
+// RealmAPIError 承载 otun-manager 返回的「业务级失败」，保留原始 HTTP 状态码
+// 与结构化字段，供上游（fulfillment handler → BFF）原样透传给前端。
+type RealmAPIError struct {
+	HTTPStatus    int
+	Code          string // 如 switch_rate_limited / egress_offline / no_assignment / egress_not_found
+	RetryAfterSec int
+}
+
+func (e *RealmAPIError) Error() string {
+	return fmt.Sprintf("realm api error: status=%d code=%s retry_after_sec=%d", e.HTTPStatus, e.Code, e.RetryAfterSec)
+}
+
+// ListRealmEgresses 列出用户可选出口（manager GET /egresses）。
+// userUUID 必须是 otun VPN users.uuid（= vpn_provision.OtunUUID），不是 auth uuid。
+func (c *OTunClient) ListRealmEgresses(ctx context.Context, userUUID string) (*RealmEgressListResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET",
+		c.baseURL+"/api/v1/internal/realm/egresses?user_uuid="+url.QueryEscape(userUUID), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("otun-manager realm egresses status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result RealmEgressListResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+	}
+	return &result, nil
+}
+
+// SelectRealmEgress 切换用户当前出口（manager POST /select）。
+// 业务级失败（429/409/404 + error 字符串）以 *RealmAPIError 返回，原始状态码与字段保留，
+// 由上游原样透传前端；网络/解码等系统级错误以普通 error 返回。
+func (c *OTunClient) SelectRealmEgress(ctx context.Context, userUUID, egressID string) (*RealmSelectResponse, error) {
+	reqBody, err := json.Marshal(map[string]string{
+		"user_uuid": userUUID,
+		"egress_id": egressID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST",
+		c.baseURL+"/api/v1/internal/realm/select", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		var result RealmSelectResponse
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+		}
+		return &result, nil
+	}
+
+	// 业务级失败：429/409/404，body 形如 {"ok":false,"error":"...","retry_after_sec":N}。
+	// 解析出结构化字段，连同原始状态码以 RealmAPIError 上抛，供透传。
+	if resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode == http.StatusConflict ||
+		resp.StatusCode == http.StatusNotFound {
+		var parsed RealmSelectResponse
+		_ = json.Unmarshal(respBody, &parsed)
+		return nil, &RealmAPIError{
+			HTTPStatus:    resp.StatusCode,
+			Code:          parsed.Error,
+			RetryAfterSec: parsed.RetryAfterSec,
+		}
+	}
+
+	return nil, fmt.Errorf("otun-manager realm select status %d: %s", resp.StatusCode, string(respBody))
+}

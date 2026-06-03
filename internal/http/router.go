@@ -143,6 +143,11 @@ func (s *Server) setupRoutes() {
 		// VPN status (lightweight, no protocols - called by user-portal)
 		internal.GET("/vpn/user/:user_id/status", s.handler.GetUserVPNQuickStatus)
 
+		// Realm 区域选择/切换（called by user-portal BFF）— user_id→otun_uuid 解析在 service 层完成
+		internal.GET("/vpn/user/:user_id/realm/regions", s.handler.GetUserRealmRegions)
+		internal.POST("/vpn/user/:user_id/realm/region", s.handler.SelectUserRealmRegion)
+		internal.GET("/vpn/user/:user_id/realm/connect-url", s.handler.GetUserRealmConnectURL)
+
 		// VPN resource update (extend/upgrade)
 		internal.PUT("/resources/:id/vpn", s.handler.UpdateVPNResource)
 
