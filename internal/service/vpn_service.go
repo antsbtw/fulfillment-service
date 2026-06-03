@@ -511,10 +511,14 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 			// manager 未配默认出口 / 用户未分配出口。
 			return nil, fmt.Errorf("no realm egress assigned for residential user")
 		}
+		// node 字段的契约是 primary/backup（客户端按它找主节点，见 VPNProtocol.Node 注释
+		// 及 REALM_BACKEND_API_SPEC §一）。这里固定 "primary"——residential 当前只下发一条
+		// realm URL 作为主节点。egress 信息不丢：已在 URL 的 realm_id + fragment 里。
+		// 误填 egress_id（如 realm-cn-sh-01）会让客户端找不到 primary 而报 "No primary node URL found"。
 		protocols = append(protocols, models.VPNProtocol{
 			Protocol: "hysteria2-realm",
 			URL:      realmResp.ConnectURL,
-			Node:     realmResp.EgressID,
+			Node:     "primary",
 		})
 		if vp.ExpireAt != nil {
 			expireAt = vp.ExpireAt.Format(time.RFC3339)
