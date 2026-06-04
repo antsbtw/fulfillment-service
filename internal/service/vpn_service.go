@@ -47,18 +47,32 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	log.Printf("[VPNService] Provisioning VPN user for subscription=%s, plan=%s, channel=%s",
 		req.SubscriptionID, req.PlanTier, req.Channel)
 
-	// Idempotency check: if this subscription has already been provisioned, return existing result
+	// Idempotency check: if this subscription has already been provisioned, return existing result.
+	// 但只在【套餐没变】时才短路——否则同一个 subscription_id 上的套餐升降级
+	// （如 Apple 在同一订阅下先发 basic 事件、后发 residential 升级事件）会被当成重复请求
+	// 直接丢弃，新 tier 永远下发不到 otun-manager（residential 被静默卡在 standard，realm 链断）。
+	// tier 变了就放行，落到下面的 renewal/tier-update 分支，由它带新 ServiceTier 调 UpdateUser。
 	if req.SubscriptionID != "" {
 		existingBySubID, _ := s.vpnRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
 		if existingBySubID != nil && existingBySubID.Status == models.VPNProvisionStatusActive && existingBySubID.OtunUUID != nil {
-			log.Printf("[VPNService] Already provisioned for subscription=%s (provision=%s), skipping",
-				req.SubscriptionID, existingBySubID.ID)
-			return &models.ProvisionResponse{
-				ResourceID: existingBySubID.ID,
-				Status:     models.StatusActive,
-				VPNUserID:  *existingBySubID.OtunUUID,
-				Message:    "Already provisioned (idempotent)",
-			}, nil
+			incomingServiceTier := models.MapPlanToServiceTier(req.PlanTier)
+			tierUnchanged := existingBySubID.ServiceTier == incomingServiceTier &&
+				existingBySubID.PlanTier == req.PlanTier
+			if tierUnchanged {
+				log.Printf("[VPNService] Already provisioned for subscription=%s (provision=%s), same tier, skipping",
+					req.SubscriptionID, existingBySubID.ID)
+				return &models.ProvisionResponse{
+					ResourceID: existingBySubID.ID,
+					Status:     models.StatusActive,
+					VPNUserID:  *existingBySubID.OtunUUID,
+					Message:    "Already provisioned (idempotent)",
+				}, nil
+			}
+			log.Printf("[VPNService] Tier change detected for subscription=%s (provision=%s): "+
+				"%s/%s → %s/%s, proceeding to update",
+				req.SubscriptionID, existingBySubID.ID,
+				existingBySubID.PlanTier, existingBySubID.ServiceTier,
+				req.PlanTier, incomingServiceTier)
 		}
 	}
 
