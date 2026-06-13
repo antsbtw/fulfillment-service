@@ -48,18 +48,31 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		req.SubscriptionID, req.PlanTier, req.Channel)
 
 	// Idempotency check: if this subscription has already been provisioned, return existing result.
-	// 但只在【套餐没变】时才短路——否则同一个 subscription_id 上的套餐升降级
-	// （如 Apple 在同一订阅下先发 basic 事件、后发 residential 升级事件）会被当成重复请求
-	// 直接丢弃，新 tier 永远下发不到 otun-manager（residential 被静默卡在 standard，realm 链断）。
-	// tier 变了就放行，落到下面的 renewal/tier-update 分支，由它带新 ServiceTier 调 UpdateUser。
+	// 短路条件必须同时满足【套餐没变】且【到期时间没有要延长】——只比 tier 是不够的：
+	//   - 套餐升降级（如 Apple 同一订阅先发 basic 再发 residential 升级）：tier 变，要放行，
+	//     否则新 tier 永远下发不到 otun-manager（residential 卡在 standard，realm 链断）。
+	//   - 同档续期 / 赠送续期（gift 把周期改成 1 年）：tier 不变但 expire_at 要推后，也要放行，
+	//     否则被当成重复请求短路丢弃，新 expire_at 永远到不了 otun-manager（订阅表已是 1 年、
+	//     但节点仍按旧周期到期）。判据用与下面 renewal 分支一致的 calculateExpireAt 预算，
+	//     保证“是否延长”的判断和真正执行的 expireAt 同源。
+	// 只有 tier 没变【且】新算出的 expireAt 不晚于现有到期时间，才是真正的重复请求，才短路。
 	if req.SubscriptionID != "" {
 		existingBySubID, _ := s.vpnRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
 		if existingBySubID != nil && existingBySubID.Status == models.VPNProvisionStatusActive && existingBySubID.OtunUUID != nil {
 			incomingServiceTier := models.MapPlanToServiceTier(req.PlanTier)
 			tierUnchanged := existingBySubID.ServiceTier == incomingServiceTier &&
 				existingBySubID.PlanTier == req.PlanTier
-			if tierUnchanged {
-				log.Printf("[VPNService] Already provisioned for subscription=%s (provision=%s), same tier, skipping",
+
+			// 用与 renewal 分支同源的算法预估本次请求想要的 expireAt，判断是否在延长周期。
+			// gift/trial/apple/google 都是 fresh period（calculateExpireAt），与下方 switch 一致。
+			prospectiveExpireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
+			prospectiveExpireAt := s.calculateExpireAt(prospectiveExpireDays)
+			// 容差 1 分钟，避免“同一秒重复回放”因纳秒级差异被误判为延长而反复下发。
+			extendsExpiry := existingBySubID.ExpireAt == nil ||
+				prospectiveExpireAt.After(existingBySubID.ExpireAt.Add(time.Minute))
+
+			if tierUnchanged && !extendsExpiry {
+				log.Printf("[VPNService] Already provisioned for subscription=%s (provision=%s), same tier & no expiry extension, skipping",
 					req.SubscriptionID, existingBySubID.ID)
 				return &models.ProvisionResponse{
 					ResourceID: existingBySubID.ID,
@@ -68,11 +81,15 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 					Message:    "Already provisioned (idempotent)",
 				}, nil
 			}
-			log.Printf("[VPNService] Tier change detected for subscription=%s (provision=%s): "+
-				"%s/%s → %s/%s, proceeding to update",
-				req.SubscriptionID, existingBySubID.ID,
+			reason := "tier change"
+			if tierUnchanged {
+				reason = "expiry extension (renewal/gift)"
+			}
+			log.Printf("[VPNService] Provision update for subscription=%s (provision=%s) [%s]: "+
+				"%s/%s → %s/%s, prospectiveExpire=%s, proceeding to update",
+				req.SubscriptionID, existingBySubID.ID, reason,
 				existingBySubID.PlanTier, existingBySubID.ServiceTier,
-				req.PlanTier, incomingServiceTier)
+				req.PlanTier, incomingServiceTier, prospectiveExpireAt.Format(time.RFC3339))
 		}
 	}
 
