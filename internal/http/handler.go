@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/client"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/models"
+	"github.com/wenwu/saas-platform/fulfillment-service/internal/repository"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/service"
 )
 
@@ -69,6 +70,35 @@ func (h *Handler) Deprovision(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// DeprovisionVPNByUser 按 user_id 回收某用户当前的 VPN 用户（订阅换绑时由 subscription-service 调用）。
+// 用户无可回收的 VPN 用户时返回 404（调用方视为幂等成功）。
+func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if req.Reason == "" {
+		req.Reason = "subscription reassigned to another account"
+	}
+
+	if err := h.vpnService.DeprovisionVPNByUser(c.Request.Context(), userID, req.Reason); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no current VPN user for this user"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "deprovisioned", "user_id": userID})
 }
 
 func (h *Handler) DeprovisionOBox(c *gin.Context) {

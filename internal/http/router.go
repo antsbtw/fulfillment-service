@@ -151,6 +151,10 @@ func (s *Server) setupRoutes() {
 		// VPN resource update (extend/upgrade)
 		internal.PUT("/resources/:id/vpn", s.handler.UpdateVPNResource)
 
+		// VPN deprovision by user (called by subscription-service on reassign:
+		// 订阅换绑时回收旧登录账号的 VPN 用户)
+		internal.POST("/vpn/user/:user_id/deprovision", s.handler.DeprovisionVPNByUser)
+
 		// User email update (auth-service → subscription-service → fulfillment-service)
 		internal.PUT("/users/:user_id/email", s.handler.UpdateUserEmail)
 

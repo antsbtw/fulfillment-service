@@ -344,6 +344,19 @@ func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason
 	return nil
 }
 
+// DeprovisionVPNByUser 停用某用户当前的 VPN 用户（按 user_id 解析出 current provision 再走
+// DeprovisionVPNUser）。用于订阅换绑：把交易从旧登录账号迁到新登录账号时，回收旧账号正在跑的
+// otun-manager VPN 用户，避免一笔订阅养两个 VPN 用户。
+// 用户本就没有 current provision 时返回 repository.ErrNotFound（调用方据此回 404 + 幂等处理）。
+func (s *VPNService) DeprovisionVPNByUser(ctx context.Context, userID, reason string) error {
+	vp, err := s.vpnRepo.GetCurrentByUserAnyStatus(ctx, userID)
+	if err != nil {
+		// 含 repository.ErrNotFound：无可回收的 VPN 用户。
+		return err
+	}
+	return s.DeprovisionVPNUser(ctx, vp.ID, reason)
+}
+
 // UpdateVPNUser updates a VPN user (extend/upgrade)
 func (s *VPNService) UpdateVPNUser(ctx context.Context, provisionID string, req *models.UpdateVPNUserRequest) error {
 	log.Printf("[VPNService] Updating VPN user: provision=%s", provisionID)
