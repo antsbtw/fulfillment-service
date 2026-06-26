@@ -35,6 +35,8 @@ services:
       TRIAL_ENABLED: ${TRIAL_ENABLED:-true}
       TRIAL_DURATION_HOURS: ${TRIAL_DURATION_HOURS:-1}
       TRIAL_TRAFFIC_GB: ${TRIAL_TRAFFIC_GB:-1}
+      # basic/residential 履约解耦：true=一用户可并行持两种服务；默认 false=现状互斥
+      MULTI_SERVICE_ENABLED: ${MULTI_SERVICE_ENABLED:-false}
       NODE_API_PORT: 8080
       NODE_VLESS_PORT: 443
       LOG_LEVEL: info
