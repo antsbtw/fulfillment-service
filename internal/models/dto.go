@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ==================== Internal API DTOs ====================
 
@@ -320,14 +323,31 @@ type VPNQuickStatus struct {
 
 // VPNProtocol represents a single VPN protocol configuration.
 //
-// 字段名契约必须是 "protocol"（见 VPN_FULFILLMENT_DESIGN.md 及已发布客户端的
-// ProtocolConfig.CodingKeys）。曾被误改为 "protocol_name"，导致已发布老 App 解不到该字段、
-// 协议类型识别退化为默认值、最终误选 shadowsocks 而非 vless-reality（无法连接）。
-// 不要再改这个 key。
+// 序列化时【同时】输出 "protocol" 与 "protocol_name" 两个 key（值相同）。
+// 已发布客户端里存在两套解码结构体，分别认不同字段名：
+//   - ProtocolConfig.CodingKeys      认 "protocol"
+//   - VPNResourceProtocol.CodingKeys 认 "protocol_name"
+// 历史上在 protocol ↔ protocol_name 之间来回改，必然破坏其中一套。双 key 输出对两套都兼容，
+// 是唯一不会再回归的形态。不要再删任何一个 key。改动只在序列化层，不影响任何后端消费者。
 type VPNProtocol struct {
-	Protocol string `json:"protocol"` // vless, shadowsocks
+	Protocol string `json:"-"` // vless, shadowsocks（MarshalJSON 同时写出 protocol + protocol_name）
 	URL      string `json:"url"`
 	Node     string `json:"node"` // primary, backup
+}
+
+// MarshalJSON 同时输出 protocol 与 protocol_name（值相同），兼容前端两套解码结构体。
+func (p VPNProtocol) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Protocol     string `json:"protocol"`
+		ProtocolName string `json:"protocol_name"`
+		URL          string `json:"url"`
+		Node         string `json:"node"`
+	}{
+		Protocol:     p.Protocol,
+		ProtocolName: p.Protocol,
+		URL:          p.URL,
+		Node:         p.Node,
+	})
 }
 
 // UpdateVPNUserRequest is for updating VPN user (extend/upgrade)
