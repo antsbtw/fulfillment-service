@@ -318,9 +318,14 @@ type VPNQuickStatus struct {
 	ExpireAt     string `json:"expire_at,omitempty"`
 }
 
-// VPNProtocol represents a single VPN protocol configuration
+// VPNProtocol represents a single VPN protocol configuration.
+//
+// 字段名契约必须是 "protocol"（见 VPN_FULFILLMENT_DESIGN.md 及已发布客户端的
+// ProtocolConfig.CodingKeys）。曾被误改为 "protocol_name"，导致已发布老 App 解不到该字段、
+// 协议类型识别退化为默认值、最终误选 shadowsocks 而非 vless-reality（无法连接）。
+// 不要再改这个 key。
 type VPNProtocol struct {
-	Protocol string `json:"protocol_name"` // vless, shadowsocks
+	Protocol string `json:"protocol"` // vless, shadowsocks
 	URL      string `json:"url"`
 	Node     string `json:"node"` // primary, backup
 }
