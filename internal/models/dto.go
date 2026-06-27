@@ -309,6 +309,11 @@ type VPNSubscribeResponse struct {
 	TrafficUsed  int64         `json:"traffic_used"`
 	ExpireAt     string        `json:"expire_at,omitempty"`
 	Message      string        `json:"message,omitempty"`
+	// P0：出口国家 + 客户端分流策略。【仅 residential(realm) 分支填充】，标准套餐留空
+	//（omitempty 不输出），前端对标准分支按"无此字段"降级。SmartStrategy 用 RawMessage
+	// 原样透传 otun-manager 下发的结构，fulfillment 不解析其内部。
+	ExitCountry   string          `json:"exit_country,omitempty"`
+	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
 }
 
 // VPNQuickStatus is a lightweight status response without protocols

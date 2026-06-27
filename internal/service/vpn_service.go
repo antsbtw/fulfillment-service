@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -599,6 +600,9 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 
 	var protocols []models.VPNProtocol
 	var expireAt string
+	// P0：仅 residential(realm) 分支填充；标准套餐留空（前端对缺字段降级）。
+	var exitCountry string
+	var smartStrategy json.RawMessage
 
 	if vp.ServiceTier == models.ServiceTierResidential {
 		// residential 套餐：只返回该套餐自己的 realm 连接 URL（hysteria2-realm://...），
@@ -624,6 +628,9 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 			URL:      realmResp.ConnectURL,
 			Node:     "primary",
 		})
+		// P0：透传 manager 下发的出口国家 + 分流策略（仅 realm 分支）。
+		exitCountry = realmResp.ExitCountry
+		smartStrategy = realmResp.SmartStrategy
 		if vp.ExpireAt != nil {
 			expireAt = vp.ExpireAt.Format(time.RFC3339)
 		}
@@ -654,10 +661,12 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 		SubscribeURL: fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
 		DeviceID:     deviceID,
 		Protocols:    protocols,
-		TrafficLimit: vp.TrafficLimit,
-		TrafficUsed:  vp.TrafficUsed,
-		ExpireAt:     expireAt,
-		Message:      "VPN configuration retrieved successfully",
+		TrafficLimit:  vp.TrafficLimit,
+		TrafficUsed:   vp.TrafficUsed,
+		ExpireAt:      expireAt,
+		Message:       "VPN configuration retrieved successfully",
+		ExitCountry:   exitCountry,
+		SmartStrategy: smartStrategy,
 	}, nil
 }
 
