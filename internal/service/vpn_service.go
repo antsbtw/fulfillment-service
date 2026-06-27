@@ -16,10 +16,28 @@ import (
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/repository"
 )
 
+// vpnProvisionStore 是 VPNService 依赖的 vpn_provisions 读写子集（*repository.VPNProvisionRepository
+// 满足它）。抽成接口只为可测：开关分流的并行 provision 逻辑（residential 与 standard 是否互相
+// 覆盖）可以用 fake store 在无 DB 环境下断言，而不引入 mock 框架。生产仍注入真实 repo。
+type vpnProvisionStore interface {
+	GetBySubscriptionID(ctx context.Context, subscriptionID string) (*models.VPNProvision, error)
+	GetBySubscriptionIDAndServicePartition(ctx context.Context, subscriptionID string, isResidential bool) (*models.VPNProvision, error)
+	GetCurrentByUserAnyStatus(ctx context.Context, userID string) (*models.VPNProvision, error)
+	GetCurrentByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*models.VPNProvision, error)
+	GetCurrentByUser(ctx context.Context, userID string) (*models.VPNProvision, error)
+	GetByID(ctx context.Context, id string) (*models.VPNProvision, error)
+	GetOtunUUIDByUser(ctx context.Context, userID string) (*string, error)
+	GetOtunUUIDByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*string, error)
+	Create(ctx context.Context, vp *models.VPNProvision) error
+	Update(ctx context.Context, vp *models.VPNProvision) error
+	MarkNotCurrent(ctx context.Context, id string) error
+	UpdateEmailByUserID(ctx context.Context, userID, email string) error
+}
+
 // VPNService handles VPN user provisioning operations
 type VPNService struct {
 	cfg                *config.Config
-	vpnRepo            *repository.VPNProvisionRepository
+	vpnRepo            vpnProvisionStore
 	logRepo            *repository.LogRepository
 	otunClient         *client.OTunClient
 	subscriptionClient *client.SubscriptionClient
@@ -30,6 +48,9 @@ func NewVPNService(
 	cfg *config.Config,
 	vpnRepo *repository.VPNProvisionRepository,
 	logRepo *repository.LogRepository,
+	// 注：vpnRepo 形参仍是具体 *repository.VPNProvisionRepository（main.go 不变），
+	// 内部以 vpnProvisionStore 接口持有，仅为可测。
+
 	otunClient *client.OTunClient,
 	subscriptionClient *client.SubscriptionClient,
 ) *VPNService {
@@ -56,8 +77,13 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	//     但节点仍按旧周期到期）。判据用与下面 renewal 分支一致的 calculateExpireAt 预算，
 	//     保证“是否延长”的判断和真正执行的 expireAt 同源。
 	// 只有 tier 没变【且】新算出的 expireAt 不晚于现有到期时间，才是真正的重复请求，才短路。
+
+	// 本次请求的 service_tier 分区（residential vs 非 residential）。MULTI_SERVICE_ENABLED=true 时
+	// 用于按分区取该 user 的同分区记录，避免 residential 命中 standard 记录（反之亦然）→ 不再互相覆盖。
+	reqIsResidential := models.MapPlanToServiceTier(req.PlanTier) == models.ServiceTierResidential
+
 	if req.SubscriptionID != "" {
-		existingBySubID, _ := s.vpnRepo.GetBySubscriptionID(ctx, req.SubscriptionID)
+		existingBySubID, _ := s.resolveExistingBySubID(ctx, req.SubscriptionID, reqIsResidential)
 		if existingBySubID != nil && existingBySubID.Status == models.VPNProvisionStatusActive && existingBySubID.OtunUUID != nil {
 			incomingServiceTier := models.MapPlanToServiceTier(req.PlanTier)
 			tierUnchanged := existingBySubID.ServiceTier == incomingServiceTier &&
@@ -103,7 +129,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	serviceTier := models.MapPlanToServiceTier(req.PlanTier)
 
 	// 1. Check if user already has a current VPN provision
-	existing, err := s.vpnRepo.GetCurrentByUserAnyStatus(ctx, req.UserID)
+	existing, err := s.resolveExistingCurrent(ctx, req.UserID, reqIsResidential)
 	if err == nil && existing != nil && existing.OtunUUID != nil && *existing.OtunUUID != "" {
 		// Renewal scenario: update expire_at and traffic_limit
 		vpnUserID := *existing.OtunUUID
@@ -208,7 +234,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		expireDays, trafficLimit, expireAt.Format(time.RFC3339))
 
 	// 3. Check if user has an existing otun_uuid from any previous provision (e.g., trial)
-	existingOtunUUID, _ := s.vpnRepo.GetOtunUUIDByUser(ctx, req.UserID)
+	existingOtunUUID, _ := s.resolveExistingOtunUUID(ctx, req.UserID, reqIsResidential)
 
 	var actualVPNUserID string
 
@@ -306,6 +332,40 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 		VPNUserID:  actualVPNUserID,
 		Message:    "VPN user created successfully",
 	}, nil
+}
+
+// ==================== MULTI_SERVICE 开关：provision 查询分流 ====================
+//
+// 三个 resolveExisting* 是 ProvisionVPNUser 里"会因 service_tier 区分而改变结果"的 user/订阅级
+// 查询的唯一收口。开关 false 分支逐字节调用原 repo 方法（GetBySubscriptionID /
+// GetCurrentByUserAnyStatus / GetOtunUUIDByUser），与开关引入前完全等价（互斥语义不变）。
+// 开关 true 分支调用新增的 *AndServicePartition 方法，按 reqIsResidential 分区取记录，使
+// residential 与 standard 两条 current provision 互不命中、互不覆盖；且 residential 不复用
+// standard 的 otun_uuid（partition 查询在 residential 分区内查不到 standard uuid → 走 CreateUser
+// 新建独立 UUID → otun-manager 据 service_tier=residential 写独立 realm_users 表）。
+
+// resolveExistingBySubID 取该订阅的 current provision（幂等短路用）。
+func (s *VPNService) resolveExistingBySubID(ctx context.Context, subscriptionID string, isResidential bool) (*models.VPNProvision, error) {
+	if s.cfg.MultiService.Enabled {
+		return s.vpnRepo.GetBySubscriptionIDAndServicePartition(ctx, subscriptionID, isResidential)
+	}
+	return s.vpnRepo.GetBySubscriptionID(ctx, subscriptionID)
+}
+
+// resolveExistingCurrent 取该 user 的 current provision（renewal/覆盖判定用）。
+func (s *VPNService) resolveExistingCurrent(ctx context.Context, userID string, isResidential bool) (*models.VPNProvision, error) {
+	if s.cfg.MultiService.Enabled {
+		return s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
+	}
+	return s.vpnRepo.GetCurrentByUserAnyStatus(ctx, userID)
+}
+
+// resolveExistingOtunUUID 取该 user 可复用的 otun_uuid（trial→purchase 复用 / residential 不复用）。
+func (s *VPNService) resolveExistingOtunUUID(ctx context.Context, userID string, isResidential bool) (*string, error) {
+	if s.cfg.MultiService.Enabled {
+		return s.vpnRepo.GetOtunUUIDByUserAndServicePartition(ctx, userID, isResidential)
+	}
+	return s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
 }
 
 // DeprovisionVPNUser disables a VPN user

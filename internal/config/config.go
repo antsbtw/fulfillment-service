@@ -25,12 +25,26 @@ type Config struct {
 	Services       ServicesConfig
 	InternalSecret string
 	Trial          TrialConfig
+	MultiService   MultiServiceConfig
 }
 
 type TrialConfig struct {
 	Enabled       bool
 	DurationHours int
 	TrafficGB     int
+}
+
+// MultiServiceConfig 控制 residential 与 standard(basic/premium) 的 VPN 履约是否并行。
+// Enabled=false（默认）：现状互斥——同一 user 任意 service_tier 共用一条 current provision，
+//
+//	后到的 tier 覆盖先到的（升级即覆盖）。行为与开关引入前逐字节一致。
+//
+// Enabled=true：standard 与 residential 按 service_tier 分区并行——同一 user 可同时持有
+//
+//	一条 standard provision 和一条 residential provision，互不覆盖；幂等/续期的 user 级查询
+//	按本次请求的分区取记录，residential 不复用 standard 的 otun_uuid（走 CreateUser 新建）。
+type MultiServiceConfig struct {
+	Enabled bool
 }
 
 type ServerConfig struct {
@@ -120,11 +134,14 @@ func Load() *Config {
 			DurationHours: getEnvInt("TRIAL_DURATION_HOURS", 1),
 			TrafficGB:     getEnvInt("TRIAL_TRAFFIC_GB", 1),
 		},
+		MultiService: MultiServiceConfig{
+			Enabled: getEnv("MULTI_SERVICE_ENABLED", "false") == "true",
+		},
 	}
 
 	// 日志脱敏: 不记录敏感配置
-	log.Printf("[config] Fulfillment Service loaded: port=%s db=%s/%s.%s hosting=%s trial_enabled=%v",
-		cfg.Server.Port, cfg.Database.Host, cfg.Database.DBName, cfg.Database.Schema, cfg.Hosting.ServiceURL, cfg.Trial.Enabled)
+	log.Printf("[config] Fulfillment Service loaded: port=%s db=%s/%s.%s hosting=%s trial_enabled=%v multi_service_enabled=%v",
+		cfg.Server.Port, cfg.Database.Host, cfg.Database.DBName, cfg.Database.Schema, cfg.Hosting.ServiceURL, cfg.Trial.Enabled, cfg.MultiService.Enabled)
 
 	return cfg
 }

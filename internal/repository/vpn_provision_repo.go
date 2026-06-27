@@ -76,6 +76,61 @@ func (r *VPNProvisionRepository) GetCurrentByUserAnyStatus(ctx context.Context, 
 	return r.scanOne(r.pool.QueryRow(ctx, query, userID))
 }
 
+// GetCurrentByUserAndServicePartition 是 GetCurrentByUserAnyStatus 的分区版（MULTI_SERVICE_ENABLED=true 才用）。
+// 在原 (user_id, is_current=TRUE) 条件上增加 service_tier 分区过滤：
+//   - isResidential=true  → 只取该 user 的 residential current provision
+//   - isResidential=false → 只取该 user 的非 residential（standard/premium 等）current provision
+//
+// 谓词 `(service_tier = 'residential') = $2` 把 service_tier 折叠成「是否 residential」二元分区，
+// 让 residential 与 standard 两条 current 记录互不命中，从而不再互相覆盖。
+// 原方法 GetCurrentByUserAnyStatus 的签名/SQL 保持不变（开关 false 仍走它，零回归）。
+func (r *VPNProvisionRepository) GetCurrentByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*models.VPNProvision, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM fulfillment.vpn_provisions
+		WHERE user_id = $1 AND is_current = TRUE AND (service_tier = 'residential') = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, vpnColumns)
+	return r.scanOne(r.pool.QueryRow(ctx, query, userID, isResidential))
+}
+
+// GetOtunUUIDByUserAndServicePartition 是 GetOtunUUIDByUser 的分区版（MULTI_SERVICE_ENABLED=true 才用）。
+// 只在本次请求所属分区内找 otun_uuid——residential 请求不会取到 standard 记录的 otun_uuid，
+// 从而 residential 走 CreateUser 新建独立 UUID（otun-manager 据此写独立 realm_users 表），
+// 而不是复用 standard users.uuid。原方法 GetOtunUUIDByUser 不变。
+func (r *VPNProvisionRepository) GetOtunUUIDByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*string, error) {
+	query := `
+		SELECT otun_uuid FROM fulfillment.vpn_provisions
+		WHERE user_id = $1 AND otun_uuid IS NOT NULL AND otun_uuid != ''
+		  AND (service_tier = 'residential') = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	var otunUUID *string
+	err := r.pool.QueryRow(ctx, query, userID, isResidential).Scan(&otunUUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get otun_uuid (partition): %w", err)
+	}
+	return otunUUID, nil
+}
+
+// GetBySubscriptionIDAndServicePartition 是 GetBySubscriptionID 的分区版（MULTI_SERVICE_ENABLED=true 才用）。
+// residential 与 standard 通常是不同 subscription_id（多维订阅本就分 service_type），天然不冲突；
+// 但若同一 subscription_id 跨 service_type，幂等短路也按分区取记录，避免 residential 请求命中
+// standard 的 subscription provision 而被错误短路。原方法 GetBySubscriptionID 不变。
+func (r *VPNProvisionRepository) GetBySubscriptionIDAndServicePartition(ctx context.Context, subscriptionID string, isResidential bool) (*models.VPNProvision, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM fulfillment.vpn_provisions
+		WHERE subscription_id = $1 AND is_current = TRUE AND (service_tier = 'residential') = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, vpnColumns)
+	return r.scanOne(r.pool.QueryRow(ctx, query, subscriptionID, isResidential))
+}
+
 func (r *VPNProvisionRepository) GetBySubscriptionID(ctx context.Context, subscriptionID string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
