@@ -797,10 +797,22 @@ func (s *VPNService) UpdateUserEmail(ctx context.Context, userID, email string) 
 // 对应前端 no_assignment（404）。
 var ErrNoRealmAssignment = errors.New("no_assignment")
 
+// resolveResidentialOtunUUID 解析【住宅面】的 otun_uuid。realm/region 能力只对 residential
+// 有意义（标准面没有 realm 分配），因此这里【无条件】按住宅分区取 uuid，而不是用
+// GetOtunUUIDByUser（取 created_at 最新的任意面）。
+//
+// 修复 no_assignment 误报：持双面的用户若标准面 provision 后建（如先订 residential 再买
+// basic/积分），GetOtunUUIDByUser 会取到标准 uuid → manager egresses 能列全局候选（200），
+// 但 select 在 realm_user_assignment 找不到该标准 uuid → no_assignment（404），表现为
+// "list 成功但 select 失败" 的自相矛盾。强制住宅分区即可锁定真正有 assignment 的住宅 uuid。
+func (s *VPNService) resolveResidentialOtunUUID(ctx context.Context, userID string) (*string, error) {
+	return s.vpnRepo.GetOtunUUIDByUserAndServicePartition(ctx, userID, true)
+}
+
 // ListRealmEgresses 列出用户可选出口（BFF GET /resources/vpn/regions 的下游）。
-// 未开通 otun（无 otun_uuid）的用户视为无分配：返回空列表 + ErrNoRealmAssignment 让 BFF 据此判定。
+// 未开通 residential（无住宅面 otun_uuid）的用户视为无分配：ErrNoRealmAssignment 让 BFF 据此判定。
 func (s *VPNService) ListRealmEgresses(ctx context.Context, userID string) (*client.RealmEgressListResponse, error) {
-	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
@@ -813,7 +825,7 @@ func (s *VPNService) ListRealmEgresses(ctx context.Context, userID string) (*cli
 // SelectRealmEgress 切换用户当前出口（BFF POST /resources/vpn/region 的下游）。
 // 业务级失败以 *client.RealmAPIError 返回，handler 据此透传状态码。
 func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID string) (*client.RealmSelectResponse, error) {
-	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
@@ -824,9 +836,9 @@ func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID str
 }
 
 // GetRealmConnectURLForUser 取用户当前出口连接 URL（BFF 可选 GET /resources/vpn/connect-url 的下游）。
-// 无 otun_uuid 或无分配（manager 404）→ ErrNoRealmAssignment。
+// 无住宅面 otun_uuid 或无分配（manager 404）→ ErrNoRealmAssignment。
 func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string) (*client.RealmConnectURLResponse, error) {
-	otunUUID, err := s.vpnRepo.GetOtunUUIDByUser(ctx, userID)
+	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}

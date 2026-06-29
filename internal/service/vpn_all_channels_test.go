@@ -84,3 +84,49 @@ func TestQuickStatusAll_None(t *testing.T) {
 		t.Fatalf("want empty non-nil slice, got %#v", out)
 	}
 }
+
+// TestResolveResidentialOtunUUID_PrefersResidentialOverNewerStandard 复现并锁定
+// no_assignment 误报的修复：持双面用户，标准面 provision 更晚创建（如先订 residential
+// 再买 basic）。realm/region 必须解析到【住宅面】uuid（有 realm assignment），而不是
+// GetOtunUUIDByUser 取到的最新标准 uuid（无 assignment → select 报 no_assignment）。
+func TestResolveResidentialOtunUUID_PrefersResidentialOverNewerStandard(t *testing.T) {
+	const userID, resUUID, stdUUID = "u-both", "uuid-residential", "uuid-standard"
+	res := &models.VPNProvision{
+		ID: "p-res", UserID: userID, ServiceTier: models.ServiceTierResidential,
+		PlanTier: "residential", OtunUUID: ptrStr(resUUID), IsCurrent: true,
+	}
+	std := &models.VPNProvision{
+		ID: "p-std", UserID: userID, ServiceTier: models.ServiceTierStandard,
+		PlanTier: "basic", OtunUUID: ptrStr(stdUUID), IsCurrent: true,
+	}
+	// std 在 res 之后入列，模拟 created_at 更晚（GetOtunUUIDByUser 会错误地取它）。
+	store := &fakeVPNStore{rows: []*models.VPNProvision{res, std}}
+	s := newSvc(true, store)
+
+	got, err := s.resolveResidentialOtunUUID(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got == nil || *got != resUUID {
+		t.Fatalf("want residential uuid %q (with assignment), got %v", resUUID, got)
+	}
+}
+
+// TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential：只持标准面 → 住宅分区
+// 解析为 nil（上层据此返回 ErrNoRealmAssignment），不会误取标准 uuid。
+func TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential(t *testing.T) {
+	const userID = "u-std-only"
+	store := &fakeVPNStore{rows: []*models.VPNProvision{
+		{ID: "p-std", UserID: userID, ServiceTier: models.ServiceTierStandard,
+			PlanTier: "basic", OtunUUID: ptrStr("uuid-standard"), IsCurrent: true},
+	}}
+	s := newSvc(true, store)
+
+	got, err := s.resolveResidentialOtunUUID(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("want nil (no residential face), got %v", *got)
+	}
+}
