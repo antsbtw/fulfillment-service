@@ -83,5 +83,7 @@ jobs:
         # run 结束即失效，导致其他无 login 的服务 deploy 全部 denied。统一不 login。
         script: |
           cd ~/fulfillment-service
-          git pull origin main
-          ./deploy.sh
+          docker compose pull
+          docker compose up -d
+          sleep 5
+          curl -sf http://localhost:8014/health > /dev/null && echo "fulfillment-service deployed OK" || (echo "health check failed"; docker logs fulfillment-service --tail 20; exit 1)
