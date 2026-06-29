@@ -139,9 +139,13 @@ func (s *Server) setupRoutes() {
 
 		// VPN subscribe config (called by user-portal)
 		internal.GET("/vpn/user/:user_id/subscribe", s.handler.GetUserVPNSubscribe)
+		// 方案 C：一次返回所有服务面（标准 + 住宅）的订阅配置
+		internal.GET("/vpn/user/:user_id/subscribe-all", s.handler.GetUserVPNSubscribeAll)
 
 		// VPN status (lightweight, no protocols - called by user-portal)
 		internal.GET("/vpn/user/:user_id/status", s.handler.GetUserVPNQuickStatus)
+		// 方案 C：一次返回所有服务面的轻量状态
+		internal.GET("/vpn/user/:user_id/status-all", s.handler.GetUserVPNQuickStatusAll)
 
 		// Realm 区域选择/切换（called by user-portal BFF）— user_id→otun_uuid 解析在 service 层完成
 		internal.GET("/vpn/user/:user_id/realm/regions", s.handler.GetUserRealmRegions)

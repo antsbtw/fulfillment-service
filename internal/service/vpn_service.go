@@ -595,9 +595,13 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 		return nil, fmt.Errorf("no active VPN provision")
 	}
 
-	// Use auth UUID as device_id
-	deviceID := userID
+	return s.buildSubscribeResponse(ctx, vp, userID)
+}
 
+// buildSubscribeResponse 根据【单条】provision 构造该面的订阅配置（residential→realm
+// connect-url；标准→otun-manager /api/subscribe）。从 GetUserVPNSubscribeConfig 抽出，
+// 供 GetUserVPNSubscribeConfigAll 按服务面分别复用，逻辑零改动。deviceID 入参 = auth user_id。
+func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNProvision, deviceID string) (*models.VPNSubscribeResponse, error) {
 	var protocols []models.VPNProtocol
 	var expireAt string
 	// P0：仅 residential(realm) 分支填充；标准套餐留空（前端对缺字段降级）。
@@ -676,7 +680,12 @@ func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (
 	if err != nil || vp == nil {
 		return nil, fmt.Errorf("no active VPN subscription")
 	}
+	return s.buildQuickStatus(ctx, vp), nil
+}
 
+// buildQuickStatus 根据【单条】provision 构造轻量状态（含 otun-manager 实时流量/到期回填）。
+// 从 GetUserVPNQuickStatus 抽出，供 GetUserVPNQuickStatusAll 按服务面分别复用。
+func (s *VPNService) buildQuickStatus(ctx context.Context, vp *models.VPNProvision) *models.VPNQuickStatus {
 	resp := &models.VPNQuickStatus{
 		Status:       vp.Status,
 		Channel:      vp.Channel,
@@ -694,7 +703,59 @@ func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (
 		}
 	}
 
-	return resp, nil
+	return resp
+}
+
+// servicePartitions 是两个服务面的分区谓词（false=标准面 basic/premium/standard，
+// true=住宅面 residential）。GetUserVPNSubscribeConfigAll / GetUserVPNQuickStatusAll
+// 按它分别取该 user 的同分区 current provision。依赖 MULTI_SERVICE_ENABLED=true 才真正分区；
+// 开关 false 时分区查询退化为单条，两面取到同一条 → 结果与老单条接口等价（不报错）。
+var servicePartitions = []bool{false, true}
+
+// GetUserVPNSubscribeConfigAll 一次返回该 user【所有持有的服务面】的订阅配置（方案 C）。
+// 标准面与住宅面各取一条 current provision，分别构造，组成数组。未持有的面不进数组；
+// 无任何有效 provision 时返回空数组（非错误）。先校验有 active 订阅（与单条接口一致）。
+func (s *VPNService) GetUserVPNSubscribeConfigAll(ctx context.Context, userID string) ([]*models.VPNSubscribeResponse, error) {
+	if s.subscriptionClient != nil {
+		subStatus, err := s.subscriptionClient.GetUserVPNSubscription(ctx, userID)
+		if err != nil {
+			log.Printf("[VPNService] Error checking subscription for config-all: %v", err)
+			return nil, fmt.Errorf("failed to verify subscription status")
+		}
+		if subStatus == nil || !subStatus.HasActive {
+			return []*models.VPNSubscribeResponse{}, nil
+		}
+	}
+
+	out := make([]*models.VPNSubscribeResponse, 0, len(servicePartitions))
+	for _, isResidential := range servicePartitions {
+		vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
+		if err != nil || vp == nil {
+			continue // 该面未持有
+		}
+		resp, err := s.buildSubscribeResponse(ctx, vp, userID)
+		if err != nil {
+			// 单面构造失败（如 residential 未分配出口）不应拖垮另一面：记录并跳过。
+			log.Printf("[VPNService] build subscribe config failed (user=%s residential=%v): %v", userID, isResidential, err)
+			continue
+		}
+		out = append(out, resp)
+	}
+	return out, nil
+}
+
+// GetUserVPNQuickStatusAll 一次返回该 user【所有持有的服务面】的轻量状态（方案 C）。
+// 标准面与住宅面各一条，未持有的面不进数组。
+func (s *VPNService) GetUserVPNQuickStatusAll(ctx context.Context, userID string) ([]*models.VPNQuickStatus, error) {
+	out := make([]*models.VPNQuickStatus, 0, len(servicePartitions))
+	for _, isResidential := range servicePartitions {
+		vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
+		if err != nil || vp == nil {
+			continue
+		}
+		out = append(out, s.buildQuickStatus(ctx, vp))
+	}
+	return out, nil
 }
 
 // UpdateUserEmail 更新用户邮箱（subscription-service 邮箱绑定事件触发）

@@ -368,6 +368,41 @@ func (h *Handler) GetUserVPNQuickStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
 }
 
+// GetUserVPNSubscribeAll 一次返回该用户所有服务面（标准 + 住宅）的订阅配置（方案 C，internal API）。
+// 与单条接口不同：未持有/无有效订阅时返回 200 + 空数组（非 404），由前端按 service_tier 渲染。
+func (h *Handler) GetUserVPNSubscribeAll(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.GetUserVPNSubscribeConfigAll(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// GetUserVPNQuickStatusAll 一次返回该用户所有服务面的轻量状态（方案 C，internal API）。空时 200 + 空数组。
+func (h *Handler) GetUserVPNQuickStatusAll(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.GetUserVPNQuickStatusAll(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
 // ==================== Realm 区域选择/切换（internal API，user-portal BFF 调用）====================
 //
 // 这三个 handler 是 BFF realm 链路的下游。约定的对外形态（与 user-portal BFF 一致，§Q4/Q7）：
