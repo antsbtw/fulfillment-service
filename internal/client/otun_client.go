@@ -382,9 +382,13 @@ func (c *OTunClient) GetUserStats(ctx context.Context, uuid string) (*VPNUserInf
 // P0：ExitCountry + SmartStrategy 透传 manager 下发的出口国家与客户端分流策略。
 // SmartStrategy 用 RawMessage 原样透传，fulfillment 不解析内部结构。
 type RealmConnectURLResponse struct {
-	OK            bool            `json:"ok"`
-	EgressID      string          `json:"egress_id"`
-	ConnectURL    string          `json:"connect_url"`
+	OK       bool   `json:"ok"`
+	EgressID string `json:"egress_id"`
+	// ConnectURL：hy2 单协议 URL，向后兼容旧客户端（只认单 URL）。
+	ConnectURL string `json:"connect_url"`
+	// ★ConnectURLs：manager 下发的六协议各自 <proto>-realm:// URL。老 struct 无此字段会静默丢弃，
+	// 补上后 select/connect-url 可选链才能把六协议透传给 App（六协议下发到端的关键中间环节）。
+	ConnectURLs   []string        `json:"connect_urls,omitempty"`
 	ExitCountry   string          `json:"exit_country,omitempty"`
 	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
 }
@@ -452,8 +456,10 @@ type RealmEgressListResponse struct {
 // RealmSelectResponse 对应 manager POST /select 的裸响应（成功/失败同结构）。
 // P1：成功切换附带新出口的 exit_country + smart_strategy，原样透传给前端。
 type RealmSelectResponse struct {
-	OK            bool            `json:"ok"`
-	ConnectURL    string          `json:"connect_url,omitempty"`
+	OK         bool   `json:"ok"`
+	ConnectURL string `json:"connect_url,omitempty"`
+	// ★六协议：切出口后 manager 也下发六协议 URL；补此字段以透传给 App（BFF 逐字节透传，不用改）。
+	ConnectURLs   []string        `json:"connect_urls,omitempty"`
 	Error         string          `json:"error,omitempty"`
 	RetryAfterSec int             `json:"retry_after_sec,omitempty"`
 	ExitCountry   string          `json:"exit_country,omitempty"`

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -623,15 +624,13 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 			// manager 未配默认出口 / 用户未分配出口。
 			return nil, fmt.Errorf("no realm egress assigned for residential user")
 		}
-		// node 字段的契约是 primary/backup（客户端按它找主节点，见 VPNProtocol.Node 注释
-		// 及 REALM_BACKEND_API_SPEC §一）。这里固定 "primary"——residential 当前只下发一条
-		// realm URL 作为主节点。egress 信息不丢：已在 URL 的 realm_id + fragment 里。
-		// 误填 egress_id（如 realm-cn-sh-01）会让客户端找不到 primary 而报 "No primary node URL found"。
-		protocols = append(protocols, models.VPNProtocol{
-			Protocol: "hysteria2-realm",
-			URL:      realmResp.ConnectURL,
-			Node:     "primary",
-		})
+		// ★六协议：manager 下发 connect_urls[]（六协议各自 <proto>-realm:// URL）。residential 照
+		// 标准节点范式，把每条 URL 展成一条 VPNProtocol，App 用已有的多协议选择器选协议。
+		// node 字段契约是 primary/backup（客户端按它找主节点）——六条全填 "primary"（同一出口的六个面，
+		// 都是主节点；egress 信息在各 URL 的 realm_id 里不丢）。
+		// 兜底：manager 未返 connect_urls（旧 manager / 未启用六协议）时，退回单条 hy2（realmResp.ConnectURL），
+		// 保证老链路零回归。
+		protocols = append(protocols, buildRealmProtocols(realmResp.ConnectURLs, realmResp.ConnectURL)...)
 		// P0：透传 manager 下发的出口国家 + 分流策略（仅 realm 分支）。
 		exitCountry = realmResp.ExitCountry
 		smartStrategy = realmResp.SmartStrategy
@@ -672,6 +671,46 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		ExitCountry:   exitCountry,
 		SmartStrategy: smartStrategy,
 	}, nil
+}
+
+// buildRealmProtocols 把 manager 下发的六协议 connect_urls 展成 App-facing 的 VPNProtocol 列表
+// （residential 照标准节点范式返回多条 protocols[]，App 用已有多协议选择器选协议）。
+//   - protocol 值 = 各 URL 的 scheme（如 hysteria2-realm / reality-realm / ss-realm …），
+//     客户端按 <proto>-realm scheme 路由进打洞栈（与现有 residential 单协议契约一致）。
+//   - node 全填 "primary"（同一出口的六个协议面都是主节点；egress 信息在各 URL 的 realm_id 里）。
+//   - 兜底：connectURLs 为空（旧 manager 未启用六协议）时退回单条 fallbackHY2，保证零回归。
+func buildRealmProtocols(connectURLs []string, fallbackHY2 string) []models.VPNProtocol {
+	if len(connectURLs) == 0 {
+		// 旧 manager：只有单条 hy2 URL。protocol 值沿用历史 "hysteria2-realm"。
+		return []models.VPNProtocol{{Protocol: "hysteria2-realm", URL: fallbackHY2, Node: "primary"}}
+	}
+	out := make([]models.VPNProtocol, 0, len(connectURLs))
+	for _, u := range connectURLs {
+		proto := realmSchemeOf(u)
+		if proto == "" {
+			continue // 无法识别 scheme 的 URL 跳过（不塞进无 protocol 的坏项）
+		}
+		out = append(out, models.VPNProtocol{Protocol: proto, URL: u, Node: "primary"})
+	}
+	if len(out) == 0 {
+		// 全部 URL 都无法识别 scheme（异常）→ 兜底单条 hy2，避免返回空 protocols。
+		return []models.VPNProtocol{{Protocol: "hysteria2-realm", URL: fallbackHY2, Node: "primary"}}
+	}
+	return out
+}
+
+// realmSchemeOf 从 <proto>-realm://... 取出 scheme 段作 protocol 值。非 realm URL 返回空串。
+func realmSchemeOf(rawURL string) string {
+	i := strings.Index(rawURL, "://")
+	if i <= 0 {
+		return ""
+	}
+	scheme := rawURL[:i]
+	// 只接受 realm 打洞 scheme（<proto>-realm），防误把标准 URL 混入。
+	if !strings.HasSuffix(scheme, "-realm") {
+		return ""
+	}
+	return scheme
 }
 
 // GetUserVPNQuickStatus returns lightweight VPN status (no protocols)
