@@ -351,6 +351,24 @@ func (h *Handler) GetUserVPNSubscribe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
 }
 
+// GetUserVPNConfigVersion 返回用户 VPN 配置的 config_version（§8.3 轻量版本端点，internal API）。
+// 前端轻量拉此值判断是否需拉全量 + 静默重连。零凭证（只出一个 hash 串）。
+func (h *Handler) GetUserVPNConfigVersion(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+
+	version, err := h.vpnService.GetUserConfigVersion(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"config_version": version}})
+}
+
 // GetUserVPNQuickStatus gets lightweight VPN status for a user (internal API, called by user-portal)
 func (h *Handler) GetUserVPNQuickStatus(c *gin.Context) {
 	userID := c.Param("user_id")

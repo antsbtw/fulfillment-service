@@ -141,6 +141,8 @@ func (s *Server) setupRoutes() {
 		internal.GET("/vpn/user/:user_id/subscribe", s.handler.GetUserVPNSubscribe)
 		// 方案 C：一次返回所有服务面（标准 + 住宅）的订阅配置
 		internal.GET("/vpn/user/:user_id/subscribe-all", s.handler.GetUserVPNSubscribeAll)
+		// ★Batch 3（§8.3）：轻量 config_version（前端高频拉，判断是否需拉全量 + 静默重连）
+		internal.GET("/vpn/user/:user_id/version", s.handler.GetUserVPNConfigVersion)
 
 		// VPN status (lightweight, no protocols - called by user-portal)
 		internal.GET("/vpn/user/:user_id/status", s.handler.GetUserVPNQuickStatus)

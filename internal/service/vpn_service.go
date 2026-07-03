@@ -599,6 +599,17 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 	return s.buildSubscribeResponse(ctx, vp, userID)
 }
 
+// GetUserConfigVersion 返回用户当前 VPN 配置的 config_version（§8.3 轻量版本端点）。
+// 复用完整装配（config_version 依赖 protocols + smart_strategy，无法比全量更省），
+// 只回 version 串，让前端拉取体积小、可高频轮询。无有效订阅/provision → 与全量端点同语义报错。
+func (s *VPNService) GetUserConfigVersion(ctx context.Context, userID string) (string, error) {
+	resp, err := s.GetUserVPNSubscribeConfig(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	return resp.ConfigVersion, nil
+}
+
 // buildSubscribeResponse 根据【单条】provision 构造该面的订阅配置（residential→realm
 // connect-url；标准→otun-manager /api/subscribe）。从 GetUserVPNSubscribeConfig 抽出，
 // 供 GetUserVPNSubscribeConfigAll 按服务面分别复用，逻辑零改动。deviceID 入参 = auth user_id。
@@ -670,6 +681,8 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		Message:       "VPN configuration retrieved successfully",
 		ExitCountry:   exitCountry,
 		SmartStrategy: smartStrategy,
+		// ★Batch 3：config_version = protocols + smart_strategy 的稳定 hash（防 churn，§8.3）。
+		ConfigVersion: computeConfigVersion(protocols, smartStrategy),
 	}, nil
 }
 

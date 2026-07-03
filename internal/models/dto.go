@@ -314,6 +314,10 @@ type VPNSubscribeResponse struct {
 	// 原样透传 otun-manager 下发的结构，fulfillment 不解析其内部。
 	ExitCountry   string          `json:"exit_country,omitempty"`
 	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
+	// ★Batch 3（§8.3）：config_version = protocols + smart_strategy 的稳定 hash。
+	// 前端轻量拉此值（前台/建连前/30min），变了才拉全量 + 静默重连。
+	// 遵防 churn 铁律（§5.2）：只纳变了才需刷新的字段 + 集合排序，traffic_used 等实时值不纳入。
+	ConfigVersion string `json:"config_version,omitempty"`
 }
 
 // VPNQuickStatus is a lightweight status response without protocols
