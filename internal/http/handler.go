@@ -499,6 +499,64 @@ func (h *Handler) SelectUserRealmRegion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
 }
 
+// GetUserRealmCountries 按国家聚合 online 出口（internal，对应 BFF GET /resources/vpn/countries，§2c）。
+func (h *Handler) GetUserRealmCountries(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+	resp, err := h.vpnService.ListRealmCountries(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, service.ErrNoRealmAssignment) {
+			// 未开通 residential → 空国家列表（前端隐藏选国入口）。
+			c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"countries": []interface{}{}}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// SelectUserRealmCountry 切目的国（internal，对应 BFF POST /resources/vpn/select-country，§2c）。
+// 请求体 {"country":"..."}；user_id 来自路径（BFF 从 JWT 注入）。
+func (h *Handler) SelectUserRealmCountry(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+	var req struct {
+		Country string `json:"country" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "country required"})
+		return
+	}
+	resp, err := h.vpnService.SelectRealmCountry(c.Request.Context(), userID, req.Country)
+	if err != nil {
+		// 业务级失败：透传 manager 状态码 + error（not_residential 403 / no_online_egress_in_country 409 /
+		// switch_rate_limited 429）+ retry_after_sec（§Q7）。
+		var realmErr *client.RealmAPIError
+		if errors.As(err, &realmErr) {
+			data := gin.H{"ok": false, "error": realmErr.Code}
+			if realmErr.RetryAfterSec > 0 {
+				data["retry_after_sec"] = realmErr.RetryAfterSec
+			}
+			c.JSON(realmErr.HTTPStatus, gin.H{"success": false, "data": data})
+			return
+		}
+		if errors.Is(err, service.ErrNoRealmAssignment) {
+			c.JSON(http.StatusNotFound, gin.H{"success": false, "data": gin.H{"ok": false, "error": "no_assignment"}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
 // GetUserRealmConnectURL 取用户当前出口连接 URL（internal，对应 BFF GET /resources/vpn/connect-url，可选）。
 func (h *Handler) GetUserRealmConnectURL(c *gin.Context) {
 	userID := c.Param("user_id")

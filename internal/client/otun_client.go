@@ -391,6 +391,18 @@ type RealmConnectURLResponse struct {
 	ConnectURLs   []string        `json:"connect_urls,omitempty"`
 	ExitCountry   string          `json:"exit_country,omitempty"`
 	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
+	// ★2c：otun-manager 下发的 N=2 出口块（primary + backup，各自六协议 URL + region）。
+	// 老 otun / 空则该字段缺省，fulfillment 退回单出口 ConnectURLs（向后兼容）。
+	Nodes []RealmNode `json:"nodes,omitempty"`
+}
+
+// RealmNode 是 otun-manager /connect-url 返回的一个 N=2 出口块（2b-1/2c）。
+type RealmNode struct {
+	EgressID    string   `json:"egress_id"`
+	Role        string   `json:"role"` // primary / backup
+	Region      string   `json:"region,omitempty"`
+	ConnectURL  string   `json:"connect_url"`
+	ConnectURLs []string `json:"connect_urls"`
 }
 
 // GetRealmConnectURL 取 residential 用户【当前出口】的 realm 连接 URL（hysteria2-realm://...）。
@@ -563,4 +575,88 @@ func (c *OTunClient) SelectRealmEgress(ctx context.Context, userUUID, egressID s
 	}
 
 	return nil, fmt.Errorf("otun-manager realm select status %d: %s", resp.StatusCode, string(respBody))
+}
+
+// RealmCountry 是 /countries 聚合结果的一行（§7.2，零凭证）。
+type RealmCountry struct {
+	Country         string `json:"country"`
+	DisplayName     string `json:"display_name"`
+	OnlineNodeCount int    `json:"online_node_count"`
+	IsCurrent       bool   `json:"is_current"`
+}
+
+// RealmCountriesResponse 是 manager /countries 的响应。
+type RealmCountriesResponse struct {
+	Countries []RealmCountry `json:"countries"`
+}
+
+// ListRealmCountries 按国家聚合 online 出口（manager GET /countries，§7.2 零凭证）。
+func (c *OTunClient) ListRealmCountries(ctx context.Context, userUUID string) (*RealmCountriesResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET",
+		c.baseURL+"/api/v1/internal/realm/countries?user_uuid="+url.QueryEscape(userUUID), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("otun-manager realm countries status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result RealmCountriesResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+	}
+	return &result, nil
+}
+
+// SelectRealmCountry 切目的国（manager POST /select-country）。业务级失败(403/409/429)以 *RealmAPIError 上抛。
+func (c *OTunClient) SelectRealmCountry(ctx context.Context, userUUID, country string) (*RealmConnectURLResponse, error) {
+	reqBody, err := json.Marshal(map[string]string{"user_uuid": userUUID, "country": country})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST",
+		c.baseURL+"/api/v1/internal/realm/select-country", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		var result RealmConnectURLResponse
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+		}
+		return &result, nil
+	}
+	// 业务级失败：403 not_residential / 409 no_online_egress_in_country / 429 switch_rate_limited。
+	if resp.StatusCode == http.StatusForbidden ||
+		resp.StatusCode == http.StatusConflict ||
+		resp.StatusCode == http.StatusTooManyRequests {
+		var parsed RealmSelectResponse
+		_ = json.Unmarshal(respBody, &parsed)
+		return nil, &RealmAPIError{HTTPStatus: resp.StatusCode, Code: parsed.Error, RetryAfterSec: parsed.RetryAfterSec}
+	}
+	return nil, fmt.Errorf("otun-manager realm select-country status %d: %s", resp.StatusCode, string(respBody))
 }

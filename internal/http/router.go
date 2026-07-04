@@ -152,6 +152,9 @@ func (s *Server) setupRoutes() {
 		// Realm 区域选择/切换（called by user-portal BFF）— user_id→otun_uuid 解析在 service 层完成
 		internal.GET("/vpn/user/:user_id/realm/regions", s.handler.GetUserRealmRegions)
 		internal.POST("/vpn/user/:user_id/realm/region", s.handler.SelectUserRealmRegion)
+		// ★2c：按国家聚合 + 切目的国（§7.2）
+		internal.GET("/vpn/user/:user_id/realm/countries", s.handler.GetUserRealmCountries)
+		internal.POST("/vpn/user/:user_id/realm/select-country", s.handler.SelectUserRealmCountry)
 		internal.GET("/vpn/user/:user_id/realm/connect-url", s.handler.GetUserRealmConnectURL)
 
 		// VPN resource update (extend/upgrade)

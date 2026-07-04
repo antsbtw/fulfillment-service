@@ -619,6 +619,7 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	// P0：仅 residential(realm) 分支填充；标准套餐留空（前端对缺字段降级）。
 	var exitCountry string
 	var smartStrategy json.RawMessage
+	var realmNodes []models.RealmNodeSummary // ★2c：N=2 出口摘要（region 出口级），仅 realm 分支填
 
 	if vp.ServiceTier == models.ServiceTierResidential {
 		// residential 套餐：只返回该套餐自己的 realm 连接 URL（hysteria2-realm://...），
@@ -635,13 +636,12 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 			// manager 未配默认出口 / 用户未分配出口。
 			return nil, fmt.Errorf("no realm egress assigned for residential user")
 		}
-		// ★六协议：manager 下发 connect_urls[]（六协议各自 <proto>-realm:// URL）。residential 照
-		// 标准节点范式，把每条 URL 展成一条 VPNProtocol，App 用已有的多协议选择器选协议。
-		// node 字段契约是 primary/backup（客户端按它找主节点）——六条全填 "primary"（同一出口的六个面，
-		// 都是主节点；egress 信息在各 URL 的 realm_id 里不丢）。
-		// 兜底：manager 未返 connect_urls（旧 manager / 未启用六协议）时，退回单条 hy2（realmResp.ConnectURL），
-		// 保证老链路零回归。
-		protocols = append(protocols, buildRealmProtocols(realmResp.ConnectURLs, realmResp.ConnectURL)...)
+		// ★2c：manager 下发 nodes[]（N=2 出口，primary + backup，各六协议 URL）→ 展成 primary6 + backup6
+		// （最多 12 条）VPNProtocol，node 区分主备，App 选出口再选协议。region 不挂 protocol（出口级归属），
+		// 改由顶层 nodes[] 摘要表达（每出口 1 次），前端按 protocol.node == nodes[].role 匹配取 region。
+		// 兜底链：nodes[] 空（老 otun / 单出口）→ connect_urls[]（六协议单出口）→ 单 hy2。逐级零回归。
+		protocols = append(protocols, buildRealmProtocolsN2(realmResp.Nodes, realmResp.ConnectURLs, realmResp.ConnectURL)...)
+		realmNodes = buildRealmNodeSummaries(realmResp.Nodes) // nodes 空→nil（前端不读也不坏）
 		// P0：透传 manager 下发的出口国家 + 分流策略（仅 realm 分支）。
 		exitCountry = realmResp.ExitCountry
 		smartStrategy = realmResp.SmartStrategy
@@ -681,9 +681,63 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		Message:       "VPN configuration retrieved successfully",
 		ExitCountry:   exitCountry,
 		SmartStrategy: smartStrategy,
+		Nodes:         realmNodes, // ★2c：N=2 出口摘要（region 出口级；标准分支 nil→omitempty 不输出）
 		// ★Batch 3：config_version = protocols + smart_strategy 的稳定 hash（防 churn，§8.3）。
 		ConfigVersion: computeConfigVersion(protocols, smartStrategy),
 	}, nil
+}
+
+// buildRealmProtocolsN2 把 manager 下发的 N=2 nodes[] 展成 primary6 + backup6（最多 12 条）VPNProtocol。
+// ★2c：每个 node 的六协议 URL 各展一条，node 字段 = 该出口的 role（primary/backup），region 带上供展示。
+// 客户端选出口（primary/backup urltest 容灾）再选协议。逐级 fail-soft：
+//   - nodes 非空 → 展 N=2×六协议；
+//   - nodes 空 → 退回 buildRealmProtocols(connectURLs)（单出口六协议，全 primary，2b-1 前的老形态）；
+//   - connectURLs 也空 → 单条 fallbackHY2。
+func buildRealmProtocolsN2(nodes []client.RealmNode, connectURLs []string, fallbackHY2 string) []models.VPNProtocol {
+	if len(nodes) == 0 {
+		return buildRealmProtocols(connectURLs, fallbackHY2)
+	}
+	out := make([]models.VPNProtocol, 0, len(nodes)*6)
+	for _, n := range nodes {
+		role := n.Role
+		if role == "" {
+			role = "primary"
+		}
+		urls := n.ConnectURLs
+		if len(urls) == 0 && n.ConnectURL != "" {
+			urls = []string{n.ConnectURL} // 该出口只有单 hy2（异常兜底）
+		}
+		for _, u := range urls {
+			proto := realmSchemeOf(u)
+			if proto == "" {
+				continue
+			}
+			out = append(out, models.VPNProtocol{Protocol: proto, URL: u, Node: role})
+		}
+	}
+	if len(out) == 0 {
+		// 所有 node 的 URL 都无法识别（异常）→ 退回单出口/单 hy2，避免空 protocols。
+		return buildRealmProtocols(connectURLs, fallbackHY2)
+	}
+	return out
+}
+
+// buildRealmNodeSummaries 把 otun 下发的 nodes[] 收敛成顶层出口摘要（§2c region 结构）。
+// region 挂出口级（每出口 1 次），前端按 protocol.node == role 匹配取 region。
+// nodes 空（单出口/老 otun）→ 返 nil（前端不读 nodes 也不坏，零回归）。
+func buildRealmNodeSummaries(nodes []client.RealmNode) []models.RealmNodeSummary {
+	if len(nodes) == 0 {
+		return nil
+	}
+	out := make([]models.RealmNodeSummary, 0, len(nodes))
+	for _, n := range nodes {
+		role := n.Role
+		if role == "" {
+			role = "primary"
+		}
+		out = append(out, models.RealmNodeSummary{Role: role, Region: n.Region, EgressID: n.EgressID})
+	}
+	return out
 }
 
 // buildRealmProtocols 把 manager 下发的六协议 connect_urls 展成 App-facing 的 VPNProtocol 列表
@@ -885,6 +939,31 @@ func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID str
 		return nil, ErrNoRealmAssignment
 	}
 	return s.otunClient.SelectRealmEgress(ctx, *otunUUID, egressID)
+}
+
+// ListRealmCountries 按国家聚合 online 出口（BFF GET /resources/vpn/countries 的下游，§2c/§7.2）。
+func (s *VPNService) ListRealmCountries(ctx context.Context, userID string) (*client.RealmCountriesResponse, error) {
+	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve otun uuid: %w", err)
+	}
+	if otunUUID == nil || *otunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	return s.otunClient.ListRealmCountries(ctx, *otunUUID)
+}
+
+// SelectRealmCountry 切目的国（BFF POST /resources/vpn/select-country 的下游，§2c/§7.2）。
+// 业务级失败(403/409/429)以 *client.RealmAPIError 返回，handler 据此透传状态码。
+func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country string) (*client.RealmConnectURLResponse, error) {
+	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve otun uuid: %w", err)
+	}
+	if otunUUID == nil || *otunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	return s.otunClient.SelectRealmCountry(ctx, *otunUUID, country)
 }
 
 // GetRealmConnectURLForUser 取用户当前出口连接 URL（BFF 可选 GET /resources/vpn/connect-url 的下游）。

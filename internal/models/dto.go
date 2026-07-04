@@ -314,6 +314,9 @@ type VPNSubscribeResponse struct {
 	// 原样透传 otun-manager 下发的结构，fulfillment 不解析其内部。
 	ExitCountry   string          `json:"exit_country,omitempty"`
 	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
+	// ★2c：N=2 出口摘要（primary/backup 各一，region 挂出口级）。仅 realm 分支填，标准 omitempty 不输出。
+	// 前端按 protocol.node == nodes[].role 匹配取 region。单出口只 1 个 node。
+	Nodes []RealmNodeSummary `json:"nodes,omitempty"`
 	// ★Batch 3（§8.3）：config_version = protocols + smart_strategy 的稳定 hash。
 	// 前端轻量拉此值（前台/建连前/30min），变了才拉全量 + 静默重连。
 	// 遵防 churn 铁律（§5.2）：只纳变了才需刷新的字段 + 集合排序，traffic_used 等实时值不纳入。
@@ -345,6 +348,8 @@ type VPNProtocol struct {
 }
 
 // MarshalJSON 同时输出 protocol 与 protocol_name（值相同），兼容前端两套解码结构体。
+// ★2c：region 不挂 protocol（出口级归属，出现 N 次冗余）——改由 response 顶层 nodes[] 摘要
+// 表达（每出口 1 次），前端按 protocol.node 匹配 nodes[].role 取 region。protocols[] 回归纯协议列表。
 func (p VPNProtocol) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Protocol     string `json:"protocol"`
@@ -357,6 +362,15 @@ func (p VPNProtocol) MarshalJSON() ([]byte, error) {
 		URL:          p.URL,
 		Node:         p.Node,
 	})
+}
+
+// RealmNodeSummary 是 N=2 出口摘要块（response 顶层 nodes[]，§2c region 结构）。
+// region 挂在出口级（每出口 1 次），前端按 protocol.node == nodes[].role 匹配取 region。
+// 单出口(N=1)时只 1 个 node，前端不读 nodes 也不坏（零回归）。
+type RealmNodeSummary struct {
+	Role     string `json:"role"` // primary / backup
+	Region   string `json:"region,omitempty"`
+	EgressID string `json:"egress_id"`
 }
 
 // UpdateVPNUserRequest is for updating VPN user (extend/upgrade)
