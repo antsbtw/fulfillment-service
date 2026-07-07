@@ -476,6 +476,11 @@ type RealmSelectResponse struct {
 	RetryAfterSec int             `json:"retry_after_sec,omitempty"`
 	ExitCountry   string          `json:"exit_country,omitempty"`
 	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
+	// ★2c N=2：otun-manager /select 也下发 primary+backup 出口块（各自六协议 URL + region）。
+	// 老 struct 无此字段 → BFF 反序列化时静默丢弃 → App 只收到 flat connect_urls（单节点），
+	// 拿不到 backup、拿不到 node 角色 → 无法做 urltest 主备容灾。补齐后与 /select-country
+	// 的 RealmConnectURLResponse.Nodes 对齐。空/老 otun 时该字段缺省，退回单出口（向后兼容）。
+	Nodes []RealmNode `json:"nodes,omitempty"`
 }
 
 // RealmAPIError 承载 otun-manager 返回的「业务级失败」，保留原始 HTTP 状态码
