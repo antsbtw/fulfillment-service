@@ -621,6 +621,10 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	var smartStrategy json.RawMessage
 	var realmNodes []models.RealmNodeSummary // ★2c：N=2 出口摘要（region 出口级），仅 realm 分支填
 
+	// 用量默认取 vp（标准面有回写）；residential 分支下方用 realm 真源覆盖。
+	trafficUsed := vp.TrafficUsed
+	trafficLimit := vp.TrafficLimit
+
 	if vp.ServiceTier == models.ServiceTierResidential {
 		// residential 套餐：只返回该套餐自己的 realm 连接 URL（hysteria2-realm://...），
 		// 不返标准节点协议。前端解析这一条 url 即可，与解析标准套餐 url 同一流程，无需感知 realm。
@@ -645,6 +649,16 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		// P0：透传 manager 下发的出口国家 + 分流策略（仅 realm 分支）。
 		exitCountry = realmResp.ExitCountry
 		smartStrategy = realmResp.SmartStrategy
+		// ★residential 用量取 realm 真源（realm_users，agent 上报按 uuid 跨出口聚合），
+		// 覆盖 vp.TrafficUsed（vpn_provisions 那列开通后恒 0 从不回写 → 前端永远显示 0）。
+		// 老 otun 不下发这两个字段 → realmResp.Traffic* 为 0 → 退回 vp 值（向后兼容）。
+		// TrafficLimit 同源覆盖：realm 额度真源在 realm_users，与踢人判定同一口径。
+		if realmResp.TrafficUsed > 0 {
+			trafficUsed = realmResp.TrafficUsed
+		}
+		if realmResp.TrafficLimit > 0 {
+			trafficLimit = realmResp.TrafficLimit
+		}
 		if vp.ExpireAt != nil {
 			expireAt = vp.ExpireAt.Format(time.RFC3339)
 		}
@@ -668,15 +682,15 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	}
 
 	return &models.VPNSubscribeResponse{
-		Status:       "active",
-		Channel:      vp.Channel,
-		PlanTier:     vp.PlanTier,
-		ServiceTier:  vp.ServiceTier,
-		SubscribeURL: fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
-		DeviceID:     deviceID,
-		Protocols:    protocols,
-		TrafficLimit:  vp.TrafficLimit,
-		TrafficUsed:   vp.TrafficUsed,
+		Status:        "active",
+		Channel:       vp.Channel,
+		PlanTier:      vp.PlanTier,
+		ServiceTier:   vp.ServiceTier,
+		SubscribeURL:  fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
+		DeviceID:      deviceID,
+		Protocols:     protocols,
+		TrafficLimit:  trafficLimit,
+		TrafficUsed:   trafficUsed,
 		ExpireAt:      expireAt,
 		Message:       "VPN configuration retrieved successfully",
 		ExitCountry:   exitCountry,

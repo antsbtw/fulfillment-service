@@ -394,6 +394,11 @@ type RealmConnectURLResponse struct {
 	// ★2c：otun-manager 下发的 N=2 出口块（primary + backup，各自六协议 URL + region）。
 	// 老 otun / 空则该字段缺省，fulfillment 退回单出口 ConnectURLs（向后兼容）。
 	Nodes []RealmNode `json:"nodes,omitempty"`
+	// ★residential 真实用量：otun-manager 从 realm_users 下发（agent 上报按 uuid 跨出口聚合的真源）。
+	// /all residential 项用它回显，替代 vpn_provisions.traffic_used（那列恒 0 从不回写）。
+	// 老 otun 无此字段 → 0，buildSubscribeResponse 侧退回 vp.TrafficUsed（向后兼容）。
+	TrafficUsed  int64 `json:"traffic_used,omitempty"`
+	TrafficLimit int64 `json:"traffic_limit,omitempty"`
 }
 
 // RealmNode 是 otun-manager /connect-url 返回的一个 N=2 出口块（2b-1/2c）。
