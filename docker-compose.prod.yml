@@ -28,7 +28,11 @@ services:
       HOSTING_DEFAULT_REGION: us-east-1
       SUBSCRIPTION_SERVICE_URL: http://localhost:8012
       LICENSE_SERVICE_URL: http://localhost:8004
-      OTUN_MANAGER_URL: http://localhost:8022
+      # ★不能用 localhost：此值被拼进 subscribe_url 下发给【客户端】(vpn_service.go
+      # SubscribeURL = OTUN_MANAGER_URL + /api/subscribe)。localhost 会下发到用户手机
+      # 自己身上。跨节点部署须填 otun-manager 的私有 IP:8022(否则复现契约 §7 老坑)。
+      # 其他 *_SERVICE_URL 只做服务间调用、不下发客户端，同机 localhost 可接受。
+      OTUN_MANAGER_URL: http://172.26.7.44:8022
       # OBox manager (V1 dual-write; nil-safe — fulfillment skips obox calls if URL empty)
       OBOX_MANAGER_URL: http://localhost:8024
       # Trial Configuration
