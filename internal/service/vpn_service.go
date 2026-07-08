@@ -160,15 +160,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 			}
 		}
 
-		enabled := true
-		updateReq := &client.UpdateVPNUserRequest{
-			TrafficLimit: trafficLimit,
-			ExpireAt:     expireAt.Format(time.RFC3339),
-			Enabled:      &enabled,
-			ServiceTier:  serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
-		}
-
-		if err := s.otunClient.UpdateUser(ctx, vpnUserID, updateReq); err != nil {
+		if err := s.syncOtunUserQuota(ctx, vpnUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt); err != nil {
 			log.Printf("[VPNService] Warning: failed to update existing VPN user: %v", err)
 		} else {
 			log.Printf("[VPNService] Updated existing VPN user %s: expire=%s, traffic=%d",
@@ -243,14 +235,7 @@ func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.Provision
 	if existingOtunUUID != nil && *existingOtunUUID != "" {
 		// Reuse existing otun_uuid (e.g., trial → purchase conversion)
 		actualVPNUserID = *existingOtunUUID
-		enabled := true
-		updateReq := &client.UpdateVPNUserRequest{
-			TrafficLimit: trafficLimit,
-			ExpireAt:     expireAt.Format(time.RFC3339),
-			Enabled:      &enabled,
-			ServiceTier:  serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
-		}
-		if err := s.otunClient.UpdateUser(ctx, actualVPNUserID, updateReq); err != nil {
+		if err := s.syncOtunUserQuota(ctx, actualVPNUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt); err != nil {
 			return nil, fmt.Errorf("failed to update existing VPN user: %w", err)
 		}
 
@@ -420,6 +405,37 @@ func (s *VPNService) DeprovisionVPNByUser(ctx context.Context, userID, reason st
 }
 
 // UpdateVPNUser updates a VPN user (extend/upgrade)
+// syncOtunUserQuota 把新的额度/到期下发到 otun-manager,按 service_tier 分流:
+//   - standard → PUT /api/users/:uuid(原路径不变);
+//   - residential → POST /api/users(otun 侧按 auth_user_id UPSERT:已存在只更新
+//     额度/到期,uuid 稳定不变,并幂等 EnsureDefaultAssignment)。
+//
+// ★为什么必须分流(freely.gx 10GB 案,2026-07-08):WP-2 basic/residential 解耦后
+// residential 用户迁出 users 表(独立 realm_users),PUT /api/users/:uuid 对其恒 404。
+// 此前续期/trial→购买转换两条路径对 residential 也打 PUT,404 被 Warning 吞掉,
+// 导致 realm_users.traffic_limit 永远停在首开(trial)值——正式 100GB 下发不进真源,
+// App 流量回显(真源=realm_users)一直显示 trial 的 10GB。
+func (s *VPNService) syncOtunUserQuota(ctx context.Context, otunUUID, serviceTier, authUserID, email string, trafficLimit int64, expireAt time.Time) error {
+	if serviceTier == models.ServiceTierResidential {
+		_, err := s.otunClient.CreateUser(ctx, &client.CreateVPNUserRequest{
+			UUID:         otunUUID, // 兼容携带;UPSERT 实际按 auth_user_id 定位,uuid 不变
+			AuthUserID:   authUserID,
+			Email:        email,
+			TrafficLimit: trafficLimit,
+			ExpireAt:     expireAt.Format(time.RFC3339),
+			ServiceTier:  serviceTier,
+		})
+		return err
+	}
+	enabled := true
+	return s.otunClient.UpdateUser(ctx, otunUUID, &client.UpdateVPNUserRequest{
+		TrafficLimit: trafficLimit,
+		ExpireAt:     expireAt.Format(time.RFC3339),
+		Enabled:      &enabled,
+		ServiceTier:  serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
+	})
+}
+
 func (s *VPNService) UpdateVPNUser(ctx context.Context, provisionID string, req *models.UpdateVPNUserRequest) error {
 	log.Printf("[VPNService] Updating VPN user: provision=%s", provisionID)
 
