@@ -100,6 +100,12 @@ type SubscribeResponse struct {
 	Enabled      bool       `json:"enabled"`
 	Protocols    []Protocol `json:"protocols"`
 	Error        string     `json:"error,omitempty"`
+
+	// B2（2026-07-08 整改）：standard 面同样带出口国 + 分流策略（rules 模型，与 realm 面同款）。
+	// SmartStrategy 用 RawMessage 原样透传，fulfillment 不解析内部结构。老 otun 缺字段 → 零值，
+	// omitempty 下不输出（前端按"无此字段"降级，与升级前行为一致）。
+	ExitCountry   string          `json:"exit_country"`
+	SmartStrategy json.RawMessage `json:"smart_strategy"`
 }
 
 // Protocol represents a VPN protocol configuration

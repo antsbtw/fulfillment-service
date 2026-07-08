@@ -88,6 +88,9 @@ type ServicesConfig struct {
 	LicenseServiceURL      string
 	OTunManagerURL         string
 	OBoxManagerURL         string
+	// PublicBaseURL 是【下发给客户端】的公网基址（B6：subscribe_url 等对外 URL 只准拼它，
+	// 不准拼上面的内网互调地址）。portal 统一门户按路径分发到本服务。
+	PublicBaseURL string
 }
 
 func Load() *Config {
@@ -127,6 +130,7 @@ func Load() *Config {
 			LicenseServiceURL:      getEnv("LICENSE_SERVICE_URL", "http://localhost:8004"),
 			OTunManagerURL:         getEnv("OTUN_MANAGER_URL", "http://localhost:8022"),
 			OBoxManagerURL:         getEnv("OBOX_MANAGER_URL", "http://localhost:8024"),
+			PublicBaseURL:          getEnv("PUBLIC_BASE_URL", "https://portal.situstechnologies.com"),
 		},
 		InternalSecret: getEnv("INTERNAL_SECRET", ""),
 		Trial: TrialConfig{

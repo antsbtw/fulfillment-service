@@ -695,6 +695,11 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 			})
 		}
 		expireAt = config.ExpireAt
+		// B2（2026-07-08 整改）：standard 面同样透传 exit_country + smart_strategy
+		//（rules 模型，manager 按 primary 节点区域生成境外模板）。老 otun 缺字段 → 零值，
+		// omitempty 不输出，前端按"无此字段"降级（与升级前一致，部署时序安全）。
+		exitCountry = config.ExitCountry
+		smartStrategy = config.SmartStrategy
 	}
 
 	return &models.VPNSubscribeResponse{
@@ -702,7 +707,11 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		Channel:       vp.Channel,
 		PlanTier:      vp.PlanTier,
 		ServiceTier:   vp.ServiceTier,
-		SubscribeURL:  fmt.Sprintf("%s/api/subscribe", s.cfg.Services.OTunManagerURL),
+		// B6（2026-07-08 整改）：subscribe_url 是【下发给客户端】的刷新地址，必须公网可达——
+		// 指本服务自己的公网路由 /api/v1/my/vpn/subscribe（portal nginx /api/v1/my/ 已分发，
+		// JWT 同 App 现有调用），双面通用。★别再拼 OTunManagerURL：那是内网互调地址
+		//（localhost→172.26.7.44 的老坑，otun /api/subscribe 还挂内部鉴权，公网本就不可调）。
+		SubscribeURL:  fmt.Sprintf("%s/api/v1/my/vpn/subscribe", s.cfg.Services.PublicBaseURL),
 		DeviceID:      deviceID,
 		Protocols:     protocols,
 		TrafficLimit:  trafficLimit,
