@@ -23,6 +23,14 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
+	// SECURITY (2026-07-12): validate secret strength. Validate() was defined but
+	// never called; an empty/default INTERNAL_SECRET makes ConstantTimeCompare("","")==1,
+	// opening internal endpoints (provision/deprovision) to unauthenticated callers.
+	// Fail closed by refusing to boot.
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Insecure configuration: %v", err)
+	}
+
 	// Initialize database
 	pool, err := db.NewPool(cfg.Database.DSN())
 	if err != nil {
