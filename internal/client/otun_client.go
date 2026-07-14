@@ -492,6 +492,53 @@ type RealmSelectResponse struct {
 	// 拿不到 backup、拿不到 node 角色 → 无法做 urltest 主备容灾。补齐后与 /select-country
 	// 的 RealmConnectURLResponse.Nodes 对齐。空/老 otun 时该字段缺省，退回单出口（向后兼容）。
 	Nodes []RealmNode `json:"nodes,omitempty"`
+	// ★切换确认握手 P4：manager /select 下发的 ready（目标出口 agent 是否已确认应用该用户）。
+	// false=已落库未生效，App 应轮询 region-status 到 true 再启动连接（契约
+	// REALM_FRONTEND_CONTRACT_SWITCH_READY.md）。不加 omitempty——App 要能看到 false。
+	Ready bool `json:"ready"`
+}
+
+// RealmReadyResponse 对应 manager GET /api/v1/internal/realm/ready 的裸响应。
+type RealmReadyResponse struct {
+	Ready    bool   `json:"ready"`
+	EgressID string `json:"egress_id"`
+}
+
+// GetRealmUserReady 查目标出口 agent 是否已确认应用该用户（切换确认握手轮询下游）。
+// egressID 可空（manager 缺省取用户当前 assignment 的出口）。404（无 assignment）返回 nil。
+func (c *OTunClient) GetRealmUserReady(ctx context.Context, userUUID, egressID string) (*RealmReadyResponse, error) {
+	u := c.baseURL + "/api/v1/internal/realm/ready?user_uuid=" + url.QueryEscape(userUUID)
+	if egressID != "" {
+		u += "&egress_id=" + url.QueryEscape(egressID)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.setAuthHeader(httpReq)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil // no_assignment → 调用方按 ErrNoRealmAssignment 处理
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("otun-manager realm ready status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result RealmReadyResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w (body: %s)", err, string(respBody))
+	}
+	return &result, nil
 }
 
 // RealmAPIError 承载 otun-manager 返回的「业务级失败」，保留原始 HTTP 状态码

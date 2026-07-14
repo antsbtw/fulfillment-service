@@ -454,6 +454,32 @@ func (h *Handler) GetUserRealmRegions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
 }
 
+// GetUserRealmRegionStatus 查切换目标出口是否已就绪（internal，对应 BFF
+// GET /resources/vpn/region/status，切换确认握手 P4）。?egress_id= 可空（缺省=当前 assignment）。
+// App 在 select 返回 ready:false 后以 ~1s 轮询本端点，ready:true 才启动连接。
+func (h *Handler) GetUserRealmRegionStatus(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+
+	resp, err := h.vpnService.GetRealmSwitchReady(c.Request.Context(), userID, c.Query("egress_id"))
+	if err != nil {
+		if errors.Is(err, service.ErrNoRealmAssignment) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"data":    gin.H{"ok": false, "error": "no_assignment"},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
 // SelectUserRealmRegion 切换用户当前出口（internal，对应 BFF POST /resources/vpn/region）。
 // 请求体 {"egress_id":"..."}；user_id 来自路径（BFF 从 JWT 注入）。
 func (h *Handler) SelectUserRealmRegion(c *gin.Context) {

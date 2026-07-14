@@ -1005,6 +1005,26 @@ func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country str
 	return s.otunClient.SelectRealmCountry(ctx, *otunUUID, country)
 }
 
+// GetRealmSwitchReady 查目标出口是否已确认应用该用户（BFF GET /resources/vpn/region/status 的下游，
+// 切换确认握手 P4）。egressID 可空（manager 缺省取当前 assignment 出口）。
+func (s *VPNService) GetRealmSwitchReady(ctx context.Context, userID, egressID string) (*client.RealmReadyResponse, error) {
+	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve otun uuid: %w", err)
+	}
+	if otunUUID == nil || *otunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	resp, err := s.otunClient.GetRealmUserReady(ctx, *otunUUID, egressID)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil { // manager 404 no_assignment
+		return nil, ErrNoRealmAssignment
+	}
+	return resp, nil
+}
+
 // GetRealmConnectURLForUser 取用户当前出口连接 URL（BFF 可选 GET /resources/vpn/connect-url 的下游）。
 // 无住宅面 otun_uuid 或无分配（manager 404）→ ErrNoRealmAssignment。
 func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string) (*client.RealmConnectURLResponse, error) {
