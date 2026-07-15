@@ -65,25 +65,8 @@ jobs:
     - name: Image digest
       run: echo ${{ steps.meta.outputs.digest }}
 
-  deploy:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-    - name: Deploy via SSH
-      uses: appleboy/ssh-action@v1
-      with:
-        host: ${{ secrets.DEPLOY_HOST }}
-        username: ${{ secrets.DEPLOY_USER }}
-        key: ${{ secrets.DEPLOY_SSH_KEY }}
-        # 不在 deploy 里 docker login：ghcr 拉取依赖 VPS 上预先用长期 PAT 配好的凭据。
-        # 历史教训：此处曾用临时 GITHUB_TOKEN 登录，会覆盖 VPS 全局 ~/.docker/config.json，
-        # run 结束即失效，导致其他无 login 的服务 deploy 全部 denied。统一不 login。
-        script: |
-          cd ~/fulfillment-service
-          docker compose pull
-          docker compose up -d
-          sleep 5
-          curl -sf http://localhost:8014/health > /dev/null && echo "fulfillment-service deployed OK" || (echo "health check failed"; docker logs fulfillment-service --tail 20; exit 1)
+# ★部署腿已改节点侧拉取式（2026-07-15，同 otun-manager 模式）：v3-portal-01 在 CF 隧道后，
+#   runner 的 ssh-action 公网连不进本节点，旧 Deploy job 每次 push 必红。现由节点上的
+#   fulfillment-autodeploy.timer（每 3 分钟）比对 ghcr :main 镜像摘要，变了才
+#   compose pull + up + 健康检查（脚本 /usr/local/bin/fulfillment-autodeploy.sh，
+#   日志 journalctl -u fulfillment-autodeploy）。CI 只构建推镜像；push 后 ≤5 分钟自动上线。
