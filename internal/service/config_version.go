@@ -61,3 +61,93 @@ func computeConfigVersion(protocols []models.VPNProtocol, smartStrategy json.Raw
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("v%s", hex.EncodeToString(sum[:8]))
 }
+
+// computeConfigVersionWithRegions 阶段2 扩展（契约 §2.4）：哈希覆盖 regions[] 全量——
+// 授权集任何【结构性】变化（准入/撤销/租期回收/任一区域换节点/URL/策略变更/state 翻转）
+// 都必须翻转 config_version。
+//
+// ★零回归锚：regions 为空时【委托原 computeConfigVersion】——payload 逐字节同现状，
+// 标准面与未升级链路（老 otun 不下发 regions）的 version 不抖动。
+// ★防 churn 铁律延续：不纳 is_current / last_used_at（它们随用量/本地切换漂移，纳入则
+// 用户一产生流量 version 就变 → 无谓刷新重连）；regions 按 country 排序、每区域
+// protocols 按三元组排序、nodes 按 (role,egress_id) 排序——行序漂移不改变 version。
+func computeConfigVersionWithRegions(protocols []models.VPNProtocol, smartStrategy json.RawMessage, regions []models.VPNRegion) string {
+	if len(regions) == 0 {
+		return computeConfigVersion(protocols, smartStrategy)
+	}
+
+	type stableProto struct {
+		Protocol string `json:"protocol"`
+		URL      string `json:"url"`
+		Node     string `json:"node"`
+	}
+	type stableNode struct {
+		Role     string `json:"role"`
+		EgressID string `json:"egress_id"`
+	}
+	type stableRegion struct {
+		Country       string        `json:"country"`
+		State         string        `json:"state"`
+		Nodes         []stableNode  `json:"nodes"`
+		Protocols     []stableProto `json:"protocols"`
+		SmartStrategy interface{}   `json:"smart_strategy"`
+	}
+
+	stableProtos := func(ps []models.VPNProtocol) []stableProto {
+		sp := make([]stableProto, len(ps))
+		for i, p := range ps {
+			sp[i] = stableProto{Protocol: p.Protocol, URL: p.URL, Node: p.Node}
+		}
+		sort.Slice(sp, func(i, j int) bool {
+			if sp[i].Node != sp[j].Node {
+				return sp[i].Node < sp[j].Node
+			}
+			if sp[i].Protocol != sp[j].Protocol {
+				return sp[i].Protocol < sp[j].Protocol
+			}
+			return sp[i].URL < sp[j].URL
+		})
+		return sp
+	}
+	normalize := func(raw json.RawMessage) interface{} {
+		var v interface{}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return string(raw)
+			}
+		}
+		return v
+	}
+
+	sr := make([]stableRegion, len(regions))
+	for i, r := range regions {
+		nodes := make([]stableNode, len(r.Nodes))
+		for j, n := range r.Nodes {
+			nodes[j] = stableNode{Role: n.Role, EgressID: n.EgressID}
+		}
+		sort.Slice(nodes, func(a, b int) bool {
+			if nodes[a].Role != nodes[b].Role {
+				return nodes[a].Role < nodes[b].Role
+			}
+			return nodes[a].EgressID < nodes[b].EgressID
+		})
+		sr[i] = stableRegion{
+			Country:       r.Country,
+			State:         r.State,
+			Nodes:         nodes,
+			Protocols:     stableProtos(r.Protocols),
+			SmartStrategy: normalize(r.SmartStrategy),
+		}
+	}
+	sort.Slice(sr, func(i, j int) bool { return sr[i].Country < sr[j].Country })
+
+	payload := struct {
+		Protocols     []stableProto  `json:"protocols"`
+		SmartStrategy interface{}    `json:"smart_strategy"`
+		Regions       []stableRegion `json:"regions"`
+	}{stableProtos(protocols), normalize(smartStrategy), sr}
+
+	data, _ := json.Marshal(payload)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("v%s", hex.EncodeToString(sum[:8]))
+}

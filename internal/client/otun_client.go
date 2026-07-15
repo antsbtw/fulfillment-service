@@ -405,6 +405,21 @@ type RealmConnectURLResponse struct {
 	// 老 otun 无此字段 → 0，buildSubscribeResponse 侧退回 vp.TrafficUsed（向后兼容）。
 	TrafficUsed  int64 `json:"traffic_used,omitempty"`
 	TrafficLimit int64 `json:"traffic_limit,omitempty"`
+	// ★阶段2（REALM_FRONTEND_CONTRACT_REGION_SET §2.1）：授权集全量（每项自包含区域包）。
+	// 老 otun 不下发 → nil（buildSubscribeResponse 不出 regions，零回归）。
+	Regions []RealmRegion `json:"regions,omitempty"`
+}
+
+// RealmRegion 是 otun /connect-url 下发的一个授权区域包（阶段2 区域授权集）。
+// ★方向性红线（契约 §3.2）：nodes 的连接串与 smart_strategy 必须同区域整包透传/使用，
+// fulfillment 不拆包不混装。
+type RealmRegion struct {
+	Country       string          `json:"country"`
+	State         string          `json:"state"` // active | switching
+	IsCurrent     bool            `json:"is_current"`
+	Nodes         []RealmNode     `json:"nodes"`
+	SmartStrategy json.RawMessage `json:"smart_strategy,omitempty"`
+	LastUsedAt    string          `json:"last_used_at,omitempty"`
 }
 
 // RealmNode 是 otun-manager /connect-url 返回的一个 N=2 出口块（2b-1/2c）。

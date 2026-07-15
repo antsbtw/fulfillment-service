@@ -320,7 +320,23 @@ type VPNSubscribeResponse struct {
 	// ★Batch 3（§8.3）：config_version = protocols + smart_strategy 的稳定 hash。
 	// 前端轻量拉此值（前台/建连前/30min），变了才拉全量 + 静默重连。
 	// 遵防 churn 铁律（§5.2）：只纳变了才需刷新的字段 + 集合排序，traffic_used 等实时值不纳入。
+	// ★阶段2（契约 §2.4）：覆盖面扩大——授权集内任何结构性变化（准入/撤销/租期回收/
+	// 任一区域换节点/策略变更）都翻转它；is_current/last_used_at 等使用漂移值不纳入（防 churn）。
 	ConfigVersion string `json:"config_version,omitempty"`
+	// ★阶段2（契约 §2.1）：授权集全量（每项一个自包含区域包）。仅 residential 面填充，
+	// 标准面 nil→omitempty 不输出；不读新字段的老客户端行为不变（顶层字段 = 最近使用区域）。
+	Regions []VPNRegion `json:"regions,omitempty"`
+}
+
+// VPNRegion 是 /vpn/all 下发的一个授权区域包（契约 §2.1）。
+// ★方向性红线（契约 §3.2）：protocols 与 smart_strategy 必须整包使用，严禁跨区域混装。
+type VPNRegion struct {
+	Country       string             `json:"country"`
+	State         string             `json:"state"` // active | switching
+	IsCurrent     bool               `json:"is_current"`
+	Nodes         []RealmNodeSummary `json:"nodes,omitempty"`
+	Protocols     []VPNProtocol      `json:"protocols,omitempty"`
+	SmartStrategy json.RawMessage    `json:"smart_strategy,omitempty"`
 }
 
 // VPNQuickStatus is a lightweight status response without protocols

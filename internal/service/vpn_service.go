@@ -636,6 +636,7 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	var exitCountry string
 	var smartStrategy json.RawMessage
 	var realmNodes []models.RealmNodeSummary // ★2c：N=2 出口摘要（region 出口级），仅 realm 分支填
+	var vpnRegions []models.VPNRegion       // ★阶段2：授权集区域包（仅 realm 分支填）
 
 	// 用量默认取 vp（标准面有回写）；residential 分支下方用 realm 真源覆盖。
 	trafficUsed := vp.TrafficUsed
@@ -662,6 +663,9 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		// 兜底链：nodes[] 空（老 otun / 单出口）→ connect_urls[]（六协议单出口）→ 单 hy2。逐级零回归。
 		protocols = append(protocols, buildRealmProtocolsN2(realmResp.Nodes, realmResp.ConnectURLs, realmResp.ConnectURL)...)
 		realmNodes = buildRealmNodeSummaries(realmResp.Nodes) // nodes 空→nil（前端不读也不坏）
+		// ★阶段2（契约 §2.1）：授权集区域包透传（每区域 protocols 由该区域各节点 connect_urls
+		// 展开；strategy 整包同源）。老 otun 不下发 → nil → omitempty 不输出（零回归）。
+		vpnRegions = buildVPNRegions(realmResp.Regions)
 		// P0：透传 manager 下发的出口国家 + 分流策略（仅 realm 分支）。
 		exitCountry = realmResp.ExitCountry
 		smartStrategy = realmResp.SmartStrategy
@@ -721,9 +725,50 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		ExitCountry:   exitCountry,
 		SmartStrategy: smartStrategy,
 		Nodes:         realmNodes, // ★2c：N=2 出口摘要（region 出口级；标准分支 nil→omitempty 不输出）
-		// ★Batch 3：config_version = protocols + smart_strategy 的稳定 hash（防 churn，§8.3）。
-		ConfigVersion: computeConfigVersion(protocols, smartStrategy),
+		// ★Batch 3 + 阶段2：config_version 覆盖 protocols + smart_strategy + regions[] 全量
+		//（授权集任何结构性变化必翻转，契约 §2.4）；无 regions 时哈希与现状逐字节一致（零回归）。
+		ConfigVersion: computeConfigVersionWithRegions(protocols, smartStrategy, vpnRegions),
+		Regions:       vpnRegions, // ★阶段2：授权集区域包（标准分支 nil→omitempty 不输出）
 	}, nil
+}
+
+// buildVPNRegions 把 otun 下发的授权集区域包映射成 /vpn/all 的 regions[]（契约 §2.1）。
+// 每区域 protocols = 该区域各节点 connect_urls 展开（node=role，复用 realmSchemeOf 口径）；
+// smart_strategy 原样整包透传（方向性红线：不拆包不混装）。空 → nil（老 otun 零回归）。
+func buildVPNRegions(regions []client.RealmRegion) []models.VPNRegion {
+	if len(regions) == 0 {
+		return nil
+	}
+	out := make([]models.VPNRegion, 0, len(regions))
+	for _, r := range regions {
+		protos := make([]models.VPNProtocol, 0, len(r.Nodes)*6)
+		nodes := make([]models.RealmNodeSummary, 0, len(r.Nodes))
+		for _, n := range r.Nodes {
+			role := n.Role
+			if role == "" {
+				role = "primary"
+			}
+			nodes = append(nodes, models.RealmNodeSummary{Role: role, Region: n.Region, EgressID: n.EgressID})
+			urls := n.ConnectURLs
+			if len(urls) == 0 && n.ConnectURL != "" {
+				urls = []string{n.ConnectURL} // 单 hy2 兜底（异常形态）
+			}
+			for _, u := range urls {
+				if proto := realmSchemeOf(u); proto != "" {
+					protos = append(protos, models.VPNProtocol{Protocol: proto, URL: u, Node: role})
+				}
+			}
+		}
+		out = append(out, models.VPNRegion{
+			Country:       r.Country,
+			State:         r.State,
+			IsCurrent:     r.IsCurrent,
+			Nodes:         nodes,
+			Protocols:     protos,
+			SmartStrategy: r.SmartStrategy,
+		})
+	}
+	return out
 }
 
 // buildRealmProtocolsN2 把 manager 下发的 N=2 nodes[] 展成 primary6 + backup6（最多 12 条）VPNProtocol。
