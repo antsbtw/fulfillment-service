@@ -408,6 +408,13 @@ type RealmConnectURLResponse struct {
 	// ★阶段2（REALM_FRONTEND_CONTRACT_REGION_SET §2.1）：授权集全量（每项自包含区域包）。
 	// 老 otun 不下发 → nil（buildSubscribeResponse 不出 regions，零回归）。
 	Regions []RealmRegion `json:"regions,omitempty"`
+	// ★切换确认握手 / 集内秒切（REALM_FRONTEND_CONTRACT §5.2）：otun 下发 ready=true 表示集内立即
+	// 可连（免轮询）。★指针：老 otun / connect-url 路径不下发 → nil（omitempty 不输出，前端按无此
+	// 字段=需握手降级）；下发 false/true 则原样透传。此前 struct 无此字段致 otun 的 ready 被静默丢弃
+	// → 前端集内秒切收不到 ready:true 被迫轮询（2026-07-16 前端真机坐实）。
+	Ready *bool `json:"ready,omitempty"`
+	// ★容量熔断（§5.2）：目标国全节点过载时 otun 标 saturated:true（纯提示，不改连接）。同 Ready 指针语义。
+	Saturated *bool `json:"saturated,omitempty"`
 }
 
 // RealmRegion 是 otun /connect-url 下发的一个授权区域包（阶段2 区域授权集）。
@@ -661,6 +668,9 @@ type RealmCountry struct {
 	DisplayName     string `json:"display_name"`
 	OnlineNodeCount int    `json:"online_node_count"`
 	IsCurrent       bool   `json:"is_current"`
+	// ★阶段2（REALM_FRONTEND_CONTRACT §5.1）：该国是否在用户授权集内（前端据此区分集内秒切/新国准入）。
+	// 此前 struct 无此字段致 otun 下发的 in_authorized_set 被静默丢弃（2026-07-16 前端真机坐实）。
+	InAuthorizedSet bool `json:"in_authorized_set"`
 }
 
 // RealmCountriesResponse 是 manager /countries 的响应。
