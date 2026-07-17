@@ -62,6 +62,25 @@ func computeConfigVersion(protocols []models.VPNProtocol, smartStrategy json.Raw
 	return fmt.Sprintf("v%s", hex.EncodeToString(sum[:8]))
 }
 
+// combineConfigVersions 把 /vpn/all 各服务面的 config_version 合并成 /vpn/version 的单一版本串
+//（分面聚合，2026-07-17）。
+//   - 单面：原值返回——与该面 /vpn/all 的 config_version 逐字节一致，单面用户零回归；
+//   - 多面：排序后拼接再 hash（顺序无关）。任一面翻转、或面增减（含单面构造失败被 /all 跳过）
+//     都翻转合并值——本端点语义是「/vpn/all 会变吗」，必须与 /all 实际内容镜像。
+func combineConfigVersions(versions []string) string {
+	if len(versions) == 0 {
+		return ""
+	}
+	if len(versions) == 1 {
+		return versions[0]
+	}
+	sorted := append([]string(nil), versions...)
+	sort.Strings(sorted)
+	data, _ := json.Marshal(sorted)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("v%s", hex.EncodeToString(sum[:8]))
+}
+
 // computeConfigVersionWithRegions 阶段2 扩展（契约 §2.4）：哈希覆盖 regions[] 全量——
 // 授权集任何【结构性】变化（准入/撤销/租期回收/任一区域换节点/URL/策略变更/state 翻转）
 // 都必须翻转 config_version。

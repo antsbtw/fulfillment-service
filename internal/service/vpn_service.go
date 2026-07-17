@@ -618,12 +618,26 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 // GetUserConfigVersion 返回用户当前 VPN 配置的 config_version（§8.3 轻量版本端点）。
 // 复用完整装配（config_version 依赖 protocols + smart_strategy，无法比全量更省），
 // 只回 version 串，让前端拉取体积小、可高频轮询。无有效订阅/provision → 与全量端点同语义报错。
+//
+// ★分面聚合（2026-07-17，前端真机坐实契约 §3 偏差）：旧实现走不分面的 GetUserVPNSubscribeConfig
+// （GetCurrentByUser 取 created_at 最新一条），双面用户取到标准面时住宅授权集准入/撤销永不翻转
+// 版本 → 前端版本驱动刷新全瘫。本端点语义 =「/vpn/all 会变吗」，故直接镜像 GetUserVPNSubscribeConfigAll
+// 的内容（同一装配、同一跳面口径）：
+//   - 单面用户：返回该面 config_version 原值（与旧行为、与 /vpn/all 对应项逐字节一致，零回归）；
+//   - 双面用户：各面 version 合并 hash（任一面结构性变化、面增减都翻转，见 combineConfigVersions）。
 func (s *VPNService) GetUserConfigVersion(ctx context.Context, userID string) (string, error) {
-	resp, err := s.GetUserVPNSubscribeConfig(ctx, userID)
+	all, err := s.GetUserVPNSubscribeConfigAll(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	return resp.ConfigVersion, nil
+	if len(all) == 0 {
+		return "", fmt.Errorf("no active VPN provision")
+	}
+	versions := make([]string, 0, len(all))
+	for _, r := range all {
+		versions = append(versions, r.ConfigVersion)
+	}
+	return combineConfigVersions(versions), nil
 }
 
 // buildSubscribeResponse 根据【单条】provision 构造该面的订阅配置（residential→realm
@@ -1037,9 +1051,29 @@ func (s *VPNService) ListRealmCountries(ctx context.Context, userID string) (*cl
 	return s.otunClient.ListRealmCountries(ctx, *otunUUID)
 }
 
+// RealmResponseWithRegions 在 otun 原始响应之上把 regions[] 归一化成契约 §2 形态
+//（nodes 摘要 + protocols[] 展开 + smart_strategy 整包），select-country / connect-url 两读口共用，
+// 与 /vpn/all 的 regions[]（buildVPNRegions 同源）同构。外层 Regions 与嵌入结构同名字段冲突时
+// encoding/json 取最浅层 → otun 原始骨架（nodes[].connect_urls 形态、无 protocols[]）被完全遮蔽。
+// 此前把骨架直接透传，前端按契约 §5.2 读 regions[].protocols 恒为 0 → 集内本地秒切存包无料可用
+//（2026-07-16 真机坐实）。
+type RealmResponseWithRegions struct {
+	*client.RealmConnectURLResponse
+	Regions []models.VPNRegion `json:"regions,omitempty"`
+}
+
+// regionizeRealmResponse 包装 otun 响应，regions[] 过 buildVPNRegions 归一化。
+// 老 otun 不下发 regions → buildVPNRegions 返 nil → omitempty 不输出（零回归）。
+func regionizeRealmResponse(resp *client.RealmConnectURLResponse) *RealmResponseWithRegions {
+	return &RealmResponseWithRegions{
+		RealmConnectURLResponse: resp,
+		Regions:                 buildVPNRegions(resp.Regions),
+	}
+}
+
 // SelectRealmCountry 切目的国（BFF POST /resources/vpn/select-country 的下游，§2c/§7.2）。
 // 业务级失败(403/409/429)以 *client.RealmAPIError 返回，handler 据此透传状态码。
-func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country string) (*client.RealmConnectURLResponse, error) {
+func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country string) (*RealmResponseWithRegions, error) {
 	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
@@ -1047,7 +1081,11 @@ func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country str
 	if otunUUID == nil || *otunUUID == "" {
 		return nil, ErrNoRealmAssignment
 	}
-	return s.otunClient.SelectRealmCountry(ctx, *otunUUID, country)
+	resp, err := s.otunClient.SelectRealmCountry(ctx, *otunUUID, country)
+	if err != nil {
+		return nil, err
+	}
+	return regionizeRealmResponse(resp), nil
 }
 
 // GetRealmSwitchReady 查目标出口是否已确认应用该用户（BFF GET /resources/vpn/region/status 的下游，
@@ -1072,7 +1110,8 @@ func (s *VPNService) GetRealmSwitchReady(ctx context.Context, userID, egressID s
 
 // GetRealmConnectURLForUser 取用户当前出口连接 URL（BFF 可选 GET /resources/vpn/connect-url 的下游）。
 // 无住宅面 otun_uuid 或无分配（manager 404）→ ErrNoRealmAssignment。
-func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string) (*client.RealmConnectURLResponse, error) {
+// regions[] 归一化口径与 select-country 一致（RealmResponseWithRegions）。
+func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string) (*RealmResponseWithRegions, error) {
 	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
@@ -1087,7 +1126,7 @@ func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID strin
 	if resp == nil { // manager 404 no_assignment → 已就绪但还没分配出口
 		return nil, ErrNoRealmAssignment
 	}
-	return resp, nil
+	return regionizeRealmResponse(resp), nil
 }
 
 // Helper functions
