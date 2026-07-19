@@ -652,7 +652,8 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	var realmNodes []models.RealmNodeSummary // ★2c：N=2 出口摘要（region 出口级），仅 realm 分支填
 	var vpnRegions []models.VPNRegion       // ★阶段2：授权集区域包（仅 realm 分支填）
 
-	// 用量默认取 vp（标准面有回写）；residential 分支下方用 realm 真源覆盖。
+	// 用量默认取 vp，两个分支下方各用自己面的真源覆盖（vpn_provisions 的 traffic_used
+	// 无人回写恒 0，只作老 otun 缺字段时的兜底）。
 	trafficUsed := vp.TrafficUsed
 	trafficLimit := vp.TrafficLimit
 
@@ -713,6 +714,15 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 			})
 		}
 		expireAt = config.ExpireAt
+		// ★标准面用量取 otun-manager 真源（users.traffic_used，节点上报累加），覆盖
+		// vp 的死值——与 residential 分支读 realm 真源同一口径（8ead707 修 residential
+		// 时漏了这里）。0 值不覆盖：保持与老 otun 缺字段时的兜底语义一致。
+		if config.TrafficUsed > 0 {
+			trafficUsed = config.TrafficUsed
+		}
+		if config.TrafficLimit > 0 {
+			trafficLimit = config.TrafficLimit
+		}
 		// B2（2026-07-08 整改）：standard 面同样透传 exit_country + smart_strategy
 		//（rules 模型，manager 按 primary 节点区域生成境外模板）。老 otun 缺字段 → 零值，
 		// omitempty 不输出，前端按"无此字段"降级（与升级前一致，部署时序安全）。
