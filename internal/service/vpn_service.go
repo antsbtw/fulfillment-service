@@ -593,6 +593,11 @@ func (s *VPNService) GetUserVPNStatus(ctx context.Context, userID string) (*mode
 	return resp, nil
 }
 
+// ErrNoActiveSubscription：用户无有效 VPN 订阅（过期/从未订阅)——业务态而非故障。
+// handler 层据此回 403 SUBSCRIPTION_EXPIRED,勿再折成 404/500(否则 BFF 透传成 500,
+// App 无法区分"该续费"和"服务器坏了",实测会拿空配置强启内核报 kernel_fatal)。
+var ErrNoActiveSubscription = errors.New("no active VPN subscription")
+
 // GetUserVPNSubscribeConfig gets VPN subscription configuration for a user
 func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID string) (*models.VPNSubscribeResponse, error) {
 	// Verify active subscription in subscription-service (source of truth)
@@ -603,7 +608,7 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 			return nil, fmt.Errorf("failed to verify subscription status")
 		}
 		if subStatus == nil || !subStatus.HasActive {
-			return nil, fmt.Errorf("no active VPN subscription")
+			return nil, ErrNoActiveSubscription
 		}
 	}
 

@@ -3,6 +3,7 @@ package http
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/client"
@@ -344,11 +345,27 @@ func (h *Handler) GetUserVPNSubscribe(c *gin.Context) {
 
 	resp, err := h.vpnService.GetUserVPNSubscribeConfig(c.Request.Context(), userID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": err.Error()})
+		respondVPNConfigError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// respondVPNConfigError 区分"无有效订阅"业务态与其他失败:
+//   - 订阅过期/缺失(含 otun-manager 403 subscription_expired) → 403 + code=SUBSCRIPTION_EXPIRED,
+//     BFF 原样透传后 App 可引导续费,而不是当成未知 500(实测会拿空配置强启内核报 kernel_fatal);
+//   - 其余(provision 缺失/下游抖动) → 维持原 404 语义不动。
+func respondVPNConfigError(c *gin.Context, err error) {
+	if errors.Is(err, service.ErrNoActiveSubscription) || strings.Contains(err.Error(), "subscription_expired") {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"code":    "SUBSCRIPTION_EXPIRED",
+			"error":   "no active subscription: expired or never subscribed",
+		})
+		return
+	}
+	c.JSON(http.StatusNotFound, gin.H{"success": false, "error": err.Error()})
 }
 
 // GetUserVPNConfigVersion 返回用户 VPN 配置的 config_version（§8.3 轻量版本端点，internal API）。
@@ -362,7 +379,7 @@ func (h *Handler) GetUserVPNConfigVersion(c *gin.Context) {
 
 	version, err := h.vpnService.GetUserConfigVersion(c.Request.Context(), userID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": err.Error()})
+		respondVPNConfigError(c, err)
 		return
 	}
 
