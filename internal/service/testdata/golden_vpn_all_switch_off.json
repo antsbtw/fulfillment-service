@@ -1,0 +1,110 @@
+[
+  {
+    "status": "active",
+    "channel": "stripe",
+    "plan_tier": "basic",
+    "service_tier": "standard",
+    "subscribe_url": "https://portal.example.test/api/v1/my/vpn/subscribe",
+    "device_id": "u-golden",
+    "protocols": [
+      {
+        "protocol": "vless",
+        "protocol_name": "vless",
+        "url": "vless://std-primary",
+        "node": "primary"
+      },
+      {
+        "protocol": "shadowsocks",
+        "protocol_name": "shadowsocks",
+        "url": "ss://std-backup",
+        "node": "backup"
+      }
+    ],
+    "traffic_limit": 53687091200,
+    "traffic_used": 1234,
+    "expire_at": "2026-12-01T00:00:00Z",
+    "message": "VPN configuration retrieved successfully",
+    "exit_country": "US",
+    "smart_strategy": {
+      "mode": "rules",
+      "version": 1
+    },
+    "config_version": "v8c09975268105fa0"
+  },
+  {
+    "status": "active",
+    "channel": "apple",
+    "plan_tier": "residential",
+    "service_tier": "residential",
+    "subscribe_url": "https://portal.example.test/api/v1/my/vpn/subscribe",
+    "device_id": "u-golden",
+    "protocols": [
+      {
+        "protocol": "hysteria2-realm",
+        "protocol_name": "hysteria2-realm",
+        "url": "hysteria2-realm://res-hy2",
+        "node": "primary"
+      },
+      {
+        "protocol": "reality-realm",
+        "protocol_name": "reality-realm",
+        "url": "reality-realm://res-reality",
+        "node": "primary"
+      },
+      {
+        "protocol": "hysteria2-realm",
+        "protocol_name": "hysteria2-realm",
+        "url": "hysteria2-realm://res-hy2-b",
+        "node": "backup"
+      }
+    ],
+    "traffic_limit": 107374182400,
+    "traffic_used": 4321,
+    "expire_at": "2026-12-01T00:00:00Z",
+    "message": "VPN configuration retrieved successfully",
+    "exit_country": "DE",
+    "smart_strategy": {
+      "mode": "rules",
+      "version": 2
+    },
+    "nodes": [
+      {
+        "role": "primary",
+        "region": "de",
+        "egress_id": "eg-1"
+      },
+      {
+        "role": "backup",
+        "region": "de",
+        "egress_id": "eg-2"
+      }
+    ],
+    "config_version": "v35f26447d608b185",
+    "regions": [
+      {
+        "country": "DE",
+        "state": "active",
+        "is_current": true,
+        "nodes": [
+          {
+            "role": "primary",
+            "region": "de",
+            "egress_id": "eg-1"
+          }
+        ],
+        "protocols": [
+          {
+            "protocol": "hysteria2-realm",
+            "protocol_name": "hysteria2-realm",
+            "url": "hysteria2-realm://res-hy2",
+            "node": "primary"
+          }
+        ],
+        "smart_strategy": {
+          "mode": "rules",
+          "version": 2
+        }
+      }
+    ]
+  }
+]
