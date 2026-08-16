@@ -69,12 +69,23 @@ func main() {
 		oboxClient,
 	)
 
+	// 订阅/订购 profile 记账层（document/subscription-entitlement/*）。开关 false 只影子写。
+	entitlementProfileRepo := repository.NewEntitlementProfileRepository(pool)
+	entitlementProfiles := service.NewEntitlementProfileService(
+		entitlementProfileRepo,
+		vpnRepo,
+		otunClient,
+		cfg.Entitlement.Enabled,
+		cfg.Entitlement.SwitchLead,
+	)
+
 	vpnService := service.NewVPNService(
 		cfg,
 		vpnRepo,
 		logRepo,
 		otunClient,
 		subscriptionClient,
+		entitlementProfiles,
 	)
 
 	entitlementService := service.NewEntitlementService(
@@ -95,8 +106,15 @@ func main() {
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	go cleanupScheduler.Start(cleanupCtx)
 
+	// EntitlementScheduler：时间驱动的订阅→订购接续（仅开关 true 启动；1 min 一轮，
+	// 提前量 = ENTITLEMENT_SWITCH_LEAD_MINUTES ≥ otun-manager cleanup 间隔 1h）
+	if cfg.Entitlement.Enabled {
+		entitlementScheduler := service.NewEntitlementScheduler(entitlementProfiles, 1*time.Minute, cfg.Entitlement.SwitchLead)
+		go entitlementScheduler.Start(cleanupCtx)
+	}
+
 	// Initialize HTTP server
-	server := http.NewServer(cfg, pool, provisionService, vpnService, entitlementService)
+	server := http.NewServer(cfg, pool, provisionService, vpnService, entitlementService, entitlementProfiles)
 
 	// Start server in goroutine
 	go func() {

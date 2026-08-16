@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 )
 
 // 不安全的默认值列表 (生产环境不应使用)
@@ -26,6 +27,18 @@ type Config struct {
 	InternalSecret string
 	Trial          TrialConfig
 	MultiService   MultiServiceConfig
+	Entitlement    EntitlementConfig
+}
+
+// EntitlementConfig 订阅/订购 profile 记账层开关（document/subscription-entitlement/*）。
+// Enabled=false（默认）：旧履约路径不动 + 影子写记账表（profiles/entries）+ 响应不带新字段，不驱动 otun。
+// Enabled=true：记账层接管 otun 同步（Resolve+Sync）、响应带 active_class/profiles[]、调度器启动。
+// 回退只需关开关，记账表不删。
+// SwitchLead：订阅到期前多久开始"桥接推送"（把 otun expire 提前推到订阅到期+桶天数），
+// 必须 ≥ otun-manager UserCleanupService 间隔（1h），默认 65 分钟。
+type EntitlementConfig struct {
+	Enabled    bool
+	SwitchLead time.Duration
 }
 
 type TrialConfig struct {
@@ -141,11 +154,15 @@ func Load() *Config {
 		MultiService: MultiServiceConfig{
 			Enabled: getEnv("MULTI_SERVICE_ENABLED", "false") == "true",
 		},
+		Entitlement: EntitlementConfig{
+			Enabled:    getEnv("ENTITLEMENT_PROFILES_ENABLED", "false") == "true",
+			SwitchLead: time.Duration(getEnvInt("ENTITLEMENT_SWITCH_LEAD_MINUTES", 65)) * time.Minute,
+		},
 	}
 
 	// 日志脱敏: 不记录敏感配置
-	log.Printf("[config] Fulfillment Service loaded: port=%s db=%s/%s.%s hosting=%s trial_enabled=%v multi_service_enabled=%v",
-		cfg.Server.Port, cfg.Database.Host, cfg.Database.DBName, cfg.Database.Schema, cfg.Hosting.ServiceURL, cfg.Trial.Enabled, cfg.MultiService.Enabled)
+	log.Printf("[config] Fulfillment Service loaded: port=%s db=%s/%s.%s hosting=%s trial_enabled=%v multi_service_enabled=%v entitlement_profiles_enabled=%v switch_lead=%v",
+		cfg.Server.Port, cfg.Database.Host, cfg.Database.DBName, cfg.Database.Schema, cfg.Hosting.ServiceURL, cfg.Trial.Enabled, cfg.MultiService.Enabled, cfg.Entitlement.Enabled, cfg.Entitlement.SwitchLead)
 
 	return cfg
 }

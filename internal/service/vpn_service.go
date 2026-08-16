@@ -43,6 +43,9 @@ type VPNService struct {
 	logRepo            *repository.LogRepository
 	otunClient         *client.OTunClient
 	subscriptionClient *client.SubscriptionClient
+	// entitlement：订阅/订购 profile 记账层（可 nil = 未接线，行为与引入前一致）。
+	// 开关见 cfg.Entitlement.Enabled：false 影子写；true 接管 otun 同步 + 响应带 profiles[]。
+	entitlement *EntitlementProfileService
 }
 
 // NewVPNService creates a new VPN service
@@ -55,6 +58,7 @@ func NewVPNService(
 
 	otunClient *client.OTunClient,
 	subscriptionClient *client.SubscriptionClient,
+	entitlement *EntitlementProfileService,
 ) *VPNService {
 	return &VPNService{
 		cfg:                cfg,
@@ -62,11 +66,198 @@ func NewVPNService(
 		logRepo:            logRepo,
 		otunClient:         otunClient,
 		subscriptionClient: subscriptionClient,
+		entitlement:        entitlement,
 	}
 }
 
-// ProvisionVPNUser creates or renews a VPN user in otun-manager
+// entitlementEnabled：记账层已接线且开关 true。
+func (s *VPNService) entitlementEnabled() bool {
+	return s.entitlement != nil && s.cfg != nil && s.cfg.Entitlement.Enabled
+}
+
+// ProvisionVPNUser creates or renews a VPN user in otun-manager.
+//
+// ★entitlement profiles 分流（IMPL_PROMPT Step 5）：
+//   - 开关 true 且非 trial：新路径 provisionViaEntitlement —— 请求转 entry → ApplyEntry → Resolve → Sync，
+//     跳过旧的按 subscription_id 幂等短路 / 按 channel 的 expire switch / 反查 otun 叠加 / 流量覆盖；
+//     幂等下沉到 entries 唯一键；otun_uuid 仍复用（uuid 不变是形态 B 的根基）。
+//   - 开关 false：旧路径 provisionVPNUserLegacy 逐字节不动，成功后【影子写】entry/profile（不 Sync）。
+//   - trial（business_type=trial）：仍按现状建号（旧路径），仅额外落 class=trial profile；开关 true 时随后 Sync（幂等）。
 func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
+	isTrial := req.BusinessType == models.BusinessTypeTrial || req.Channel == "trial"
+	if s.entitlementEnabled() && !isTrial {
+		return s.provisionViaEntitlement(ctx, req)
+	}
+	resp, err := s.provisionVPNUserLegacy(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if s.entitlement != nil {
+		in := entryInputFromRequest(s, req)
+		if _, _, aerr := s.entitlement.ApplyEntry(ctx, in); aerr != nil {
+			log.Printf("[VPNService] entitlement shadow ApplyEntry failed (user=%s face=%s): %v", in.UserID, in.ServiceFace, aerr)
+		} else if s.entitlementEnabled() {
+			if _, serr := s.entitlement.Sync(ctx, in.UserID, in.ServiceFace); serr != nil {
+				log.Printf("[VPNService] entitlement Sync after trial provision failed (user=%s face=%s): %v", in.UserID, in.ServiceFace, serr)
+			}
+		}
+	}
+	return resp, nil
+}
+
+// entryInputFromRequest 把 ProvisionRequest 转成记账层条目输入（天数/流量与旧路径同源算法）。
+func entryInputFromRequest(s *VPNService, req *models.ProvisionRequest) *EntryInput {
+	serviceTier := models.MapPlanToServiceTier(req.PlanTier)
+	return &EntryInput{
+		UserID:         req.UserID,
+		ServiceFace:    models.ServiceFaceOf(serviceTier),
+		SubscriptionID: req.SubscriptionID,
+		Channel:        req.Channel,
+		ChannelSubID:   req.ChannelSubID,
+		PurchaseType:   req.PurchaseType,
+		BusinessType:   req.BusinessType,
+		Days:           s.calculateExpireDays(req.Channel, req.ExpireDays),
+		Traffic:        s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit),
+		PeriodStart:    req.PeriodStart,
+		PeriodEnd:      req.PeriodEnd,
+	}
+}
+
+// provisionViaEntitlement 开关 true 的开通/续期路径（非 trial）。
+//  1. 保证该面有 otun 账号 + 投影行（复用 otun_uuid；没有才 CreateUser）
+//  2. ApplyEntry（幂等入账）
+//  3. Sync（Resolve + 推 otun + 更新投影行）
+func (s *VPNService) provisionViaEntitlement(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
+	log.Printf("[VPNService] Provisioning (entitlement) subscription=%s plan=%s channel=%s purchase_type=%s",
+		req.SubscriptionID, req.PlanTier, req.Channel, req.PurchaseType)
+
+	businessType := req.BusinessType
+	if businessType == "" {
+		businessType = models.BusinessTypeSubscription
+	}
+	serviceTier := models.MapPlanToServiceTier(req.PlanTier)
+	isResidential := serviceTier == models.ServiceTierResidential
+	in := entryInputFromRequest(s, req)
+
+	// 首推值（新建账号 / 首次落投影行用）；随后 Sync 会按裁决结果覆盖。
+	initialExpire := s.calculateExpireAt(in.Days)
+	if req.PeriodEnd != nil && req.PeriodEnd.After(time.Now()) {
+		initialExpire = *req.PeriodEnd
+	}
+	trafficLimit := in.Traffic
+
+	// 1. 该面 current 投影行 + otun 账号（★形态 B：按面分区，与 MULTI_SERVICE 开关无关）
+	existing, _ := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, req.UserID, isResidential)
+	var otunUUID string
+	if existing != nil && existing.OtunUUID != nil && *existing.OtunUUID != "" {
+		otunUUID = *existing.OtunUUID
+	} else if reuse, _ := s.vpnRepo.GetOtunUUIDByUserAndServicePartition(ctx, req.UserID, isResidential); reuse != nil && *reuse != "" {
+		otunUUID = *reuse
+	}
+	if otunUUID == "" {
+		vpnUserID := uuid.New().String()
+		otunReq := &client.CreateVPNUserRequest{
+			UUID:         vpnUserID,
+			Email:        req.UserEmail,
+			AuthUserID:   req.UserID,
+			Protocols:    []string{"vless", "shadowsocks"},
+			SSPassword:   generateRandomPassword(16),
+			TrafficLimit: trafficLimit,
+			ExpireAt:     initialExpire.Format(time.RFC3339),
+			ServiceTier:  serviceTier,
+		}
+		otunResp, err := s.otunClient.CreateUser(ctx, otunReq)
+		if err != nil {
+			s.logRepo.LogAction(ctx, "", "vpn", "vpn_user_create_failed", "failed", err.Error())
+			return nil, fmt.Errorf("failed to create VPN user in otun-manager: %w", err)
+		}
+		otunUUID = otunResp.UUID
+		if otunUUID == "" {
+			otunUUID = vpnUserID
+		}
+	}
+
+	var vp *models.VPNProvision
+	created := false
+	if existing != nil && existing.Channel == req.Channel && existing.OtunUUID != nil && *existing.OtunUUID == otunUUID {
+		// 同渠道续期/追加：投影行原地更新元数据（expire/traffic 由 Sync 按裁决写）
+		existing.SubscriptionID = req.SubscriptionID
+		existing.BusinessType = businessType
+		existing.ServiceTier = serviceTier
+		existing.PlanTier = req.PlanTier
+		existing.Status = models.VPNProvisionStatusActive
+		existing.IsCurrent = true
+		if req.UserEmail != "" {
+			existing.Email = req.UserEmail
+		}
+		if err := s.vpnRepo.Update(ctx, existing); err != nil {
+			log.Printf("[VPNService] Warning: update projection row failed: %v", err)
+		}
+		vp = existing
+	} else {
+		// 渠道变化（如 trial→apple）或该面无行：老行保留为历史，新建投影行（uuid 不变）
+		if existing != nil {
+			s.vpnRepo.MarkNotCurrent(ctx, existing.ID)
+		}
+		vp = &models.VPNProvision{
+			ID:             uuid.New().String(),
+			UserID:         req.UserID,
+			SubscriptionID: req.SubscriptionID,
+			Channel:        req.Channel,
+			BusinessType:   businessType,
+			ServiceTier:    serviceTier,
+			OtunUUID:       &otunUUID,
+			PlanTier:       req.PlanTier,
+			Status:         models.VPNProvisionStatusActive,
+			TrafficLimit:   trafficLimit,
+			TrafficUsed:    0,
+			ExpireAt:       &initialExpire,
+			Email:          req.UserEmail,
+			DeviceID:       req.DeviceID,
+			IsCurrent:      true,
+		}
+		if err := s.vpnRepo.Create(ctx, vp); err != nil {
+			return nil, fmt.Errorf("failed to save vpn provision: %w", err)
+		}
+		created = true
+	}
+
+	// 2. 入账（幂等）
+	if _, _, err := s.entitlement.ApplyEntry(ctx, in); err != nil {
+		return nil, fmt.Errorf("apply entitlement entry: %w", err)
+	}
+	// 3. 裁决 + 同步 otun + 投影
+	if _, err := s.entitlement.Sync(ctx, in.UserID, in.ServiceFace); err != nil {
+		// 入账已成功；同步失败留给调度器/下次读兜底，但要告警（不吞）
+		log.Printf("[VPNService] Warning: entitlement Sync failed user=%s face=%s: %v", in.UserID, in.ServiceFace, err)
+	}
+
+	action, msg := "vpn_user_updated", "VPN user updated (entitlement)"
+	if created {
+		action, msg = "vpn_user_created", "VPN user created successfully"
+	}
+	s.logRepo.LogActionWithMetadata(ctx, vp.ID, "vpn", action, "active", msg,
+		map[string]interface{}{
+			"vpn_user_id":   otunUUID,
+			"plan_tier":     req.PlanTier,
+			"service_tier":  serviceTier,
+			"channel":       req.Channel,
+			"purchase_type": req.PurchaseType,
+			"path":          "entitlement",
+		})
+	s.notifyVPNActive(ctx, req.SubscriptionID, vp.ID, otunUUID)
+
+	return &models.ProvisionResponse{
+		ResourceID: vp.ID,
+		Status:     models.StatusActive,
+		VPNUserID:  otunUUID,
+		Message:    msg,
+	}, nil
+}
+
+// provisionVPNUserLegacy 是开关 false（及 trial）沿用的旧路径，逐字节不动。
+
+func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
 	log.Printf("[VPNService] Provisioning VPN user for subscription=%s, plan=%s, channel=%s",
 		req.SubscriptionID, req.PlanTier, req.Channel)
 
@@ -1258,7 +1449,7 @@ func (s *VPNService) calculateExpireAtWithStacking(ctx context.Context, vpnUserI
 
 // notifyVPNActive notifies subscription-service that VPN is active
 func (s *VPNService) notifyVPNActive(ctx context.Context, subscriptionID, resourceID, vpnUserID string) {
-	if subscriptionID == "" {
+	if subscriptionID == "" || s.subscriptionClient == nil {
 		return
 	}
 	callback := &models.SubscriptionCallback{
