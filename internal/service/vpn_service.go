@@ -30,6 +30,10 @@ type vpnProvisionStore interface {
 	GetByID(ctx context.Context, id string) (*models.VPNProvision, error)
 	GetOtunUUIDByUser(ctx context.Context, userID string) (*string, error)
 	GetOtunUUIDByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*string, error)
+	// ★第三产品面（迁移 010）：按 product_face 分区的读口；*AndServicePartition 在真 repo 里已收口到它们。
+	GetCurrentByUserAndFace(ctx context.Context, userID, face string) (*models.VPNProvision, error)
+	GetOtunUUIDByUserAndFace(ctx context.Context, userID, face string) (*string, error)
+	GetBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error)
 	Create(ctx context.Context, vp *models.VPNProvision) error
 	Update(ctx context.Context, vp *models.VPNProvision) error
 	MarkNotCurrent(ctx context.Context, id string) error
@@ -46,6 +50,9 @@ type VPNService struct {
 	// entitlement：订阅/订购 profile 记账层（可 nil = 未接线，行为与引入前一致）。
 	// 开关见 cfg.Entitlement.Enabled：false 影子写；true 接管 otun 同步 + 响应带 profiles[]。
 	entitlement *EntitlementProfileService
+	// campaignGrants：第三产品面 campaign 的入账台账（可 nil = 未接线：campaign 开通报错、/vpn/all
+	// campaign 元素不带统计）。见 campaign_service.go。
+	campaignGrants campaignGrantStore
 }
 
 // NewVPNService creates a new VPN service
@@ -59,8 +66,9 @@ func NewVPNService(
 	otunClient *client.OTunClient,
 	subscriptionClient *client.SubscriptionClient,
 	entitlement *EntitlementProfileService,
+	campaignGrants *repository.CampaignGrantRepository,
 ) *VPNService {
-	return &VPNService{
+	svc := &VPNService{
 		cfg:                cfg,
 		vpnRepo:            vpnRepo,
 		logRepo:            logRepo,
@@ -68,6 +76,10 @@ func NewVPNService(
 		subscriptionClient: subscriptionClient,
 		entitlement:        entitlement,
 	}
+	if campaignGrants != nil {
+		svc.campaignGrants = campaignGrants
+	}
+	return svc
 }
 
 // entitlementEnabled：记账层已接线且开关 true。
@@ -84,6 +96,11 @@ func (s *VPNService) entitlementEnabled() bool {
 //   - 开关 false：旧路径 provisionVPNUserLegacy 逐字节不动，成功后【影子写】entry/profile（不 Sync）。
 //   - trial（business_type=trial）：仍按现状建号（旧路径），仅额外落 class=trial profile；开关 true 时随后 Sync（幂等）。
 func (s *VPNService) ProvisionVPNUser(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
+	// ★第三产品面 campaign（plan_tier=campaign）：独立入口，不进 legacy / entitlement 任一路径
+	//（零交集：不进形态 B 记账、不碰 basic/residential 行与 otun 账号）。见 campaign_service.go。
+	if isCampaignRequest(req) {
+		return s.provisionCampaign(ctx, req)
+	}
 	isTrial := req.BusinessType == models.BusinessTypeTrial || req.Channel == "trial"
 	if s.entitlementEnabled() && !isTrial {
 		return s.provisionViaEntitlement(ctx, req)
@@ -844,7 +861,13 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 //   - 单面用户：返回该面 config_version 原值（与旧行为、与 /vpn/all 对应项逐字节一致，零回归）；
 //   - 双面用户：各面 version 合并 hash（任一面结构性变化、面增减都翻转，见 combineConfigVersions）。
 func (s *VPNService) GetUserConfigVersion(ctx context.Context, userID string) (string, error) {
-	all, err := s.GetUserVPNSubscribeConfigAll(ctx, userID)
+	return s.GetUserConfigVersionWithCaps(ctx, userID, nil)
+}
+
+// GetUserConfigVersionWithCaps 带能力集的版本口：老客户端（caps 空）与 GetUserConfigVersion 逐字节一致（契约 C6：
+// 活动账号变化不翻转老客户端的 version）；声明 campaign-profile 的客户端把 campaign 元素也纳入合并。
+func (s *VPNService) GetUserConfigVersionWithCaps(ctx context.Context, userID string, caps ClientCapabilities) (string, error) {
+	all, err := s.GetUserVPNSubscribeConfigAllWithCaps(ctx, userID, caps)
 	if err != nil {
 		return "", err
 	}
@@ -1230,6 +1253,17 @@ var servicePartitions = []bool{false, true}
 // 标准面与住宅面各取一条 current provision，分别构造，组成数组。未持有的面不进数组；
 // 无任何有效 provision 时返回空数组（非错误）。先校验有 active 订阅（与单条接口一致）。
 func (s *VPNService) GetUserVPNSubscribeConfigAll(ctx context.Context, userID string) ([]*models.VPNSubscribeResponse, error) {
+	return s.GetUserVPNSubscribeConfigAllWithCaps(ctx, userID, nil)
+}
+
+// GetUserVPNSubscribeConfigAllWithCaps 带客户端能力集的 /vpn/all（契约 C1 门控）：
+//   - caps 不含 campaign-profile（老客户端 / nil）：与 GetUserVPNSubscribeConfigAll 逐字节一致（golden 锁定），
+//     即便该用户持有活动账号也绝不出现 campaign 元素；
+//   - caps 含 campaign-profile：在 basic/residential 两面之后追加 campaign 元素（buildCampaignElement），
+//     且【不受】"是否有 active 订阅"门的约束——活动账号对订阅语义不可见（subscription-service GetActiveByUser
+//     排除 campaign），只领过活动的用户 HasActive=false 也要能拿到 campaign 元素。
+func (s *VPNService) GetUserVPNSubscribeConfigAllWithCaps(ctx context.Context, userID string, caps ClientCapabilities) ([]*models.VPNSubscribeResponse, error) {
+	hasActive := true
 	if s.subscriptionClient != nil {
 		subStatus, err := s.subscriptionClient.GetUserVPNSubscription(ctx, userID)
 		if err != nil {
@@ -1237,25 +1271,33 @@ func (s *VPNService) GetUserVPNSubscribeConfigAll(ctx context.Context, userID st
 			return nil, fmt.Errorf("failed to verify subscription status")
 		}
 		if subStatus == nil || !subStatus.HasActive {
-			return []*models.VPNSubscribeResponse{}, nil
+			hasActive = false
 		}
 	}
 
-	out := make([]*models.VPNSubscribeResponse, 0, len(servicePartitions))
-	for _, isResidential := range servicePartitions {
-		// ★读前兜底 Resolve+Sync（开关 true；幂等）——先于取投影行，保证行 = 裁决后的生效值。
-		s.resolveEntitlementForRead(ctx, userID, isResidential)
-		vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
-		if err != nil || vp == nil {
-			continue // 该面未持有
+	out := make([]*models.VPNSubscribeResponse, 0, len(servicePartitions)+1)
+	if hasActive {
+		for _, isResidential := range servicePartitions {
+			// ★读前兜底 Resolve+Sync（开关 true；幂等）——先于取投影行，保证行 = 裁决后的生效值。
+			s.resolveEntitlementForRead(ctx, userID, isResidential)
+			vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
+			if err != nil || vp == nil {
+				continue // 该面未持有
+			}
+			resp, err := s.buildSubscribeResponse(ctx, vp, userID)
+			if err != nil {
+				// 单面构造失败（如 residential 未分配出口）不应拖垮另一面：记录并跳过。
+				log.Printf("[VPNService] build subscribe config failed (user=%s residential=%v): %v", userID, isResidential, err)
+				continue
+			}
+			out = append(out, resp)
 		}
-		resp, err := s.buildSubscribeResponse(ctx, vp, userID)
-		if err != nil {
-			// 单面构造失败（如 residential 未分配出口）不应拖垮另一面：记录并跳过。
-			log.Printf("[VPNService] build subscribe config failed (user=%s residential=%v): %v", userID, isResidential, err)
-			continue
+	}
+	// ★门控：只有声明能力的客户端才追加 campaign 元素（C1）；无活动账号/已清理 → 不追加（C5）。
+	if caps.Has(CapabilityCampaignProfile) {
+		if el := s.buildCampaignElement(ctx, userID); el != nil {
+			out = append(out, el)
 		}
-		out = append(out, resp)
 	}
 	return out, nil
 }

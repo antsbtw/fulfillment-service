@@ -166,6 +166,11 @@ func (s *Server) setupRoutes() {
 		// 订阅换绑时回收旧登录账号的 VPN 用户)
 		internal.POST("/vpn/user/:user_id/deprovision", s.handler.DeprovisionVPNByUser)
 
+		// ★第三产品面 campaign（document/marketing-campaign/*）：撤销扣减（subscription-service 调）+
+		// 活动账号读口（campaign-service 叠加闸 / me / preview 调）。开通仍走 POST /provision（plan_tier=campaign）。
+		internal.POST("/vpn/campaign/revoke", s.handler.RevokeCampaign)
+		internal.GET("/vpn/campaign/user/:user_id", s.handler.GetCampaignProfile)
+
 		// User email update (auth-service → subscription-service → fulfillment-service)
 		internal.PUT("/users/:user_id/email", s.handler.UpdateUserEmail)
 

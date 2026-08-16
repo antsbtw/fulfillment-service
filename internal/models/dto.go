@@ -332,6 +332,26 @@ type VPNSubscribeResponse struct {
 	// profiles[]：该面存在的 profile；端上不得依赖新增字段决定连接。既有 16 个字段一个不删（H9）。
 	ActiveClass string           `json:"active_class,omitempty"`
 	Profiles    []VPNProfileView `json:"profiles,omitempty"`
+	// ★活动 profile（CAMPAIGN_PROFILE_CLIENT_CONTRACT §3，字段名冻结 §8）。仅 campaign 元素填充
+	//（且仅在请求带 X-Client-Capabilities: campaign-profile 时该元素才出现）；basic/residential 元素
+	// 零值 omitempty 不输出（与改动前逐字节一致，golden 锁定）。
+	ProfileClass string        `json:"profile_class,omitempty"` // "campaign"（冗余分键）
+	Campaign     *CampaignInfo `json:"campaign,omitempty"`
+}
+
+// CampaignInfo 是 campaign 元素的 campaign{} 子对象（契约 §3；全部可缺，端上不得依赖它决定连接）。
+type CampaignInfo struct {
+	ClaimsActive        int                `json:"claims_active"`
+	GrantedDaysTotal    int                `json:"granted_days_total"`
+	GrantedTrafficTotal int64              `json:"granted_traffic_total"`
+	LastClaimAt         string             `json:"last_claim_at,omitempty"`
+	StackLimit          *CampaignStackLimit `json:"stack_limit,omitempty"`
+}
+
+// CampaignStackLimit 全局叠加硬上限（fulfillment env；批次级上限在 campaign-service）。
+type CampaignStackLimit struct {
+	MaxDays    int   `json:"max_days"`
+	MaxTraffic int64 `json:"max_traffic"`
 }
 
 // VPNRegion 是 /vpn/all 下发的一个授权区域包（契约 §2.1）。

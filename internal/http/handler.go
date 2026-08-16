@@ -388,7 +388,9 @@ func (h *Handler) GetUserVPNConfigVersion(c *gin.Context) {
 		return
 	}
 
-	version, err := h.vpnService.GetUserConfigVersion(c.Request.Context(), userID)
+	// ★第三产品面门控（契约 C1/C6）：BFF 透传的 X-Client-Capabilities；无头 = 老客户端，值与改动前逐字节一致。
+	caps := service.ParseClientCapabilities(c.GetHeader("X-Client-Capabilities"))
+	version, err := h.vpnService.GetUserConfigVersionWithCaps(c.Request.Context(), userID, caps)
 	if err != nil {
 		respondVPNConfigError(c, err)
 		return
@@ -423,13 +425,54 @@ func (h *Handler) GetUserVPNSubscribeAll(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.vpnService.GetUserVPNSubscribeConfigAll(c.Request.Context(), userID)
+	// ★第三产品面门控（契约 C1）：只有请求头 X-Client-Capabilities 含 campaign-profile 才追加 campaign 元素；
+	// 无头 → 与改动前逐字节一致（golden 锁定）。头由 user-portal BFF 原样透传，本服务不按 UA/版本猜。
+	caps := service.ParseClientCapabilities(c.GetHeader("X-Client-Capabilities"))
+	resp, err := h.vpnService.GetUserVPNSubscribeConfigAllWithCaps(c.Request.Context(), userID, caps)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
+}
+
+// ==================== 第三产品面 campaign（internal API）====================
+
+// RevokeCampaign 从活动账号扣减 days/traffic（下限 0），同步 otun；只动活动账号。
+// POST /api/internal/vpn/campaign/revoke（subscription-service 收到 subscription.revoked 后调用）。
+func (h *Handler) RevokeCampaign(c *gin.Context) {
+	var req service.CampaignRevokeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	res, err := h.vpnService.RevokeCampaign(c.Request.Context(), &req)
+	if err != nil {
+		if errors.Is(err, service.ErrNoCampaignProfile) {
+			c.JSON(http.StatusNotFound, gin.H{"success": false, "error": "no campaign profile"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": res})
+}
+
+// GetCampaignProfile 活动账号现状 + grant 聚合（campaign-service 叠加闸 / me / preview 读口）。
+// GET /api/internal/vpn/campaign/user/:user_id
+func (h *Handler) GetCampaignProfile(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
+		return
+	}
+	view, err := h.vpnService.GetCampaignProfile(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": view})
 }
 
 // GetUserVPNQuickStatusAll 一次返回该用户所有服务面的轻量状态（方案 C，internal API）。空时 200 + 空数组。
