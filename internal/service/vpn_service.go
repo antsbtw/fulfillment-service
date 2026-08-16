@@ -391,17 +391,38 @@ func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason
 	return nil
 }
 
-// DeprovisionVPNByUser 停用某用户当前的 VPN 用户（按 user_id 解析出 current provision 再走
-// DeprovisionVPNUser）。用于订阅换绑：把交易从旧登录账号迁到新登录账号时，回收旧账号正在跑的
-// otun-manager VPN 用户，避免一笔订阅养两个 VPN 用户。
-// 用户本就没有 current provision 时返回 repository.ErrNotFound（调用方据此回 404 + 幂等处理）。
-func (s *VPNService) DeprovisionVPNByUser(ctx context.Context, userID, reason string) error {
-	vp, err := s.vpnRepo.GetCurrentByUserAnyStatus(ctx, userID)
+// DeprovisionVPNByUser 停用某用户【指定服务面】当前的 VPN 用户（按 user_id + 面分区解析出
+// current provision 再走 DeprovisionVPNUser）。用于订阅换绑：把交易从旧登录账号迁到新登录账号时，
+// 回收旧账号正在跑的 otun-manager VPN 用户，避免一笔订阅养两个 VPN 用户。
+//
+// ★P0（规则 §1-#5，2026-08-16）：换绑的是【一笔订阅】，只该回收它所在的服务面。此前用不分区的
+// GetCurrentByUserAnyStatus 取"最新一条 current"，持双面（standard + residential）的用户换绑
+// standard 时可能误停 residential。isResidential 由调用方按事件 plan_tier 推导；调用方未传面
+//（老 subscription-service）时 isResidential=nil，退回旧的不分区行为（兼容，不阻断换绑）。
+// 用户该面本就没有 current provision 时返回 repository.ErrNotFound（调用方据此回 404 + 幂等处理）。
+func (s *VPNService) DeprovisionVPNByUser(ctx context.Context, userID, reason string, isResidential *bool) error {
+	vp, err := s.resolveDeprovisionTarget(ctx, userID, isResidential)
 	if err != nil {
 		// 含 repository.ErrNotFound：无可回收的 VPN 用户。
 		return err
 	}
 	return s.DeprovisionVPNUser(ctx, vp.ID, reason)
+}
+
+// resolveDeprovisionTarget 是 DeprovisionVPNByUser 的定位收口：给了面 → 分区查询；没给 → 旧行为。
+// 抽出来只为可测（换绑 standard 不动 residential 的断言不需要触达 otun-manager）。
+func (s *VPNService) resolveDeprovisionTarget(ctx context.Context, userID string, isResidential *bool) (*models.VPNProvision, error) {
+	if isResidential == nil {
+		return s.vpnRepo.GetCurrentByUserAnyStatus(ctx, userID)
+	}
+	vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, *isResidential)
+	if err != nil {
+		return nil, err
+	}
+	if vp == nil {
+		return nil, repository.ErrNotFound
+	}
+	return vp, nil
 }
 
 // UpdateVPNUser updates a VPN user (extend/upgrade)

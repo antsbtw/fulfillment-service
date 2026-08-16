@@ -82,15 +82,24 @@ func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {
 		return
 	}
 
+	// ★P0：换绑只回收该订阅所在的服务面。调用方带 plan_tier（缺省按事件 plan_tier 推导）或
+	// 显式 is_residential；两者都缺（老调用方）时退回不分区旧行为。
 	var req struct {
-		Reason string `json:"reason"`
+		Reason        string `json:"reason"`
+		PlanTier      string `json:"plan_tier"`
+		IsResidential *bool  `json:"is_residential"`
 	}
 	_ = c.ShouldBindJSON(&req)
 	if req.Reason == "" {
 		req.Reason = "subscription reassigned to another account"
 	}
+	isResidential := req.IsResidential
+	if isResidential == nil && req.PlanTier != "" {
+		v := models.MapPlanToServiceTier(req.PlanTier) == models.ServiceTierResidential
+		isResidential = &v
+	}
 
-	if err := h.vpnService.DeprovisionVPNByUser(c.Request.Context(), userID, req.Reason); err != nil {
+	if err := h.vpnService.DeprovisionVPNByUser(c.Request.Context(), userID, req.Reason, isResidential); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "no current VPN user for this user"})
 			return
