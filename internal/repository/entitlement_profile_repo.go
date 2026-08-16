@@ -85,10 +85,13 @@ func (r *EntitlementProfileRepository) ListFacesDueForResolve(ctx context.Contex
 		SELECT DISTINCT a.user_id, a.service_face
 		FROM fulfillment.vpn_entitlement_profiles a
 		WHERE a.status = 'active' AND a.expire_at IS NOT NULL AND a.expire_at <= $1
-		  AND EXISTS (
-		      SELECT 1 FROM fulfillment.vpn_entitlement_profiles w
-		      WHERE w.user_id = a.user_id AND w.service_face = a.service_face
-		        AND w.class = 'purchase' AND w.days_remaining > 0 AND w.id <> a.id
+		  AND (
+		      a.class = 'purchase'   -- 生效中的桶自然耗尽也要主动结算（验收 F1），不依赖读时兜底
+		      OR EXISTS (
+		          SELECT 1 FROM fulfillment.vpn_entitlement_profiles w
+		          WHERE w.user_id = a.user_id AND w.service_face = a.service_face
+		            AND w.class = 'purchase' AND w.days_remaining > 0 AND w.id <> a.id
+		      )
 		  )
 		LIMIT $2`
 	rows, err := r.pool.Query(ctx, q, horizon, limit)

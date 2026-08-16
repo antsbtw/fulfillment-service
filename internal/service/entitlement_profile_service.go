@@ -489,7 +489,10 @@ func (s *EntitlementProfileService) Resolve(ctx context.Context, userID, face st
 	switch {
 	case subValid:
 		active = models.EntitlementClassSubscription
-	case pur != nil && pur.DaysRemaining > 0:
+	case pur != nil && pur.DaysRemaining > 0 &&
+		(pur.Status != models.ProfileStatusActive || (pur.ExpireAt != nil && pur.ExpireAt.After(now))):
+		// 生效中的桶以 expire_at 为准（days_remaining 是上次 tick 的快照）：过了 expire 就不再判 purchase，
+		// 首次 Resolve 即结算，避免"一拍陈旧"（验收 F1）。
 		active = models.EntitlementClassPurchase
 	case triValid:
 		active = models.EntitlementClassTrial

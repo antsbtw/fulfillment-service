@@ -598,6 +598,35 @@ func TestEntitlement_NoneKeepsLastExpire(t *testing.T) {
 	}
 }
 
+// TestEntitlement_PurchaseNaturalExpiry_FirstResolveSettles 验收 F1：订购桶生效中跨过 expire_at 后，
+// **首次** Resolve 就不再判 purchase（结算为 expired / none），不允许一拍陈旧。
+func TestEntitlement_PurchaseNaturalExpiry_FirstResolveSettles(t *testing.T) {
+	h := newHarness(t, true)
+	const user, face = "u12", models.ServiceFaceStandard
+	h.addAccount(user, face, "uuid-std")
+	h.apply(t, oneTimeEntry(user, face, "credit", "o-1", 10, 100*GB))
+	res := h.sync(t, user, face)
+	if res.ActiveClass != models.EntitlementClassPurchase {
+		t.Fatalf("bucket alone → purchase active, got %s", res.ActiveClass)
+	}
+	// 中途 tick 一次（days_remaining 快照 > 0），再一口气跨过 expire
+	h.clk.advance(days(3))
+	h.sync(t, user, face)
+	h.clk.advance(days(8)) // 累计 11d > 10d
+	res = h.sync(t, user, face)
+	if res.ActiveClass == models.EntitlementClassPurchase {
+		t.Fatalf("F1: first Resolve after natural expiry must not report purchase active")
+	}
+	pur := res.Profiles[models.EntitlementClassPurchase]
+	if pur.Status != models.ProfileStatusExpired || pur.DaysRemaining != 0 || pur.DaysConsumed != 10 {
+		t.Fatalf("bucket want expired/0d/consumed=10, got status=%s remain=%d consumed=%d", pur.Status, pur.DaysRemaining, pur.DaysConsumed)
+	}
+	proj, _ := h.svc.Project(context.Background(), user, face, nil)
+	if proj.ActiveClass != models.ActiveClassNone || proj.ExpireAt == nil {
+		t.Fatalf("none with last expire kept, got %+v", proj)
+	}
+}
+
 // TestClassifyEntry_KindMapping 契约 §4.3 映射 + 老上游缺 purchase_type 的推断。
 func TestClassifyEntry_KindMapping(t *testing.T) {
 	cases := []struct {
