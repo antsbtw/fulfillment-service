@@ -19,6 +19,9 @@ func NewLogRepository(pool *pgxpool.Pool) *LogRepository {
 
 // Create creates a new provision log entry
 func (r *LogRepository) Create(ctx context.Context, logEntry *models.ProvisionLog) error {
+	if r == nil || r.pool == nil {
+		return nil // 未接 DB（单测）时静默跳过
+	}
 	if logEntry.ID == "" {
 		logEntry.ID = uuid.New().String()
 	}

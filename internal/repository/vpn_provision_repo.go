@@ -214,6 +214,20 @@ func (r *VPNProvisionRepository) MarkNotCurrent(ctx context.Context, id string) 
 	return nil
 }
 
+// UpdateProjection 更新该面投影行的生效值（entitlement profiles，Sync 调用）：expire_at / traffic_limit /
+// channel / active_class。★独立语句、不进 vpnColumns：active_class 列由迁移 009 引入，读路径不依赖它，
+// 迁移未先跑只会让开关 true 下的这一条 UPDATE 报错，不影响其它查询。
+func (r *VPNProvisionRepository) UpdateProjection(ctx context.Context, id string, expireAt *time.Time, trafficLimit int64, channel, activeClass string) error {
+	query := `UPDATE fulfillment.vpn_provisions
+		SET expire_at = $2, traffic_limit = $3, channel = $4, active_class = $5, updated_at = NOW()
+		WHERE id = $1`
+	_, err := r.pool.Exec(ctx, query, id, expireAt, trafficLimit, channel, activeClass)
+	if err != nil {
+		return fmt.Errorf("update vpn_provision projection: %w", err)
+	}
+	return nil
+}
+
 func (r *VPNProvisionRepository) UpdateTrafficUsed(ctx context.Context, id string, trafficUsed int64) error {
 	query := `UPDATE fulfillment.vpn_provisions SET traffic_used = $1, updated_at = NOW() WHERE id = $2`
 	_, err := r.pool.Exec(ctx, query, trafficUsed, id)
