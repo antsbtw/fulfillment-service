@@ -127,3 +127,48 @@ func mustTime(s string) time.Time {
 	}
 	return t
 }
+
+// TestVPNAll_Golden_SwitchOff_WithLedgerWired：记账层已接线且已有 profiles（影子写），但开关 false →
+// /vpn/all 仍与改动前 golden 逐字节一致（新增字段不出现、既有字段不被投影覆盖）。
+func TestVPNAll_Golden_SwitchOff_WithLedgerWired(t *testing.T) {
+	const userID = "u-golden"
+	store := goldenStore(userID)
+	s, done := newGoldenSvc(t, store)
+	defer done()
+	clk := &clock{t: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
+	entStore := &fakeEntitlementStore{}
+	s.entitlement = &EntitlementProfileService{
+		store: entStore, provisions: store, otun: &fakeOtunGateway{used: map[string]int64{}},
+		enabled: false, switchLead: 65 * time.Minute, now: clk.now,
+	}
+	s.cfg.Entitlement = config.EntitlementConfig{Enabled: false, SwitchLead: 65 * time.Minute}
+	// 影子写：两面各一条订阅 + 一笔订购
+	exp := mustTime("2026-12-01T00:00:00Z")
+	for _, face := range []string{models.ServiceFaceStandard, models.ServiceFaceResidential} {
+		if _, _, err := s.entitlement.ApplyEntry(context.Background(), &EntryInput{UserID: userID, ServiceFace: face,
+			SubscriptionID: "sub-" + face, Channel: "stripe", PurchaseType: "subscription", PeriodEnd: &exp, Traffic: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.entitlement.ApplyEntry(context.Background(), &EntryInput{UserID: userID, ServiceFace: face,
+			SubscriptionID: "o-" + face, Channel: "credit", PurchaseType: "one_time", Days: 30, Traffic: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(entStore.profiles) != 4 {
+		t.Fatalf("shadow write expected 4 profiles, got %d", len(entStore.profiles))
+	}
+
+	all, err := s.GetUserVPNSubscribeConfigAll(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetUserVPNSubscribeConfigAll: %v", err)
+	}
+	got, _ := json.MarshalIndent(all, "", "  ")
+	got = append(got, '\n')
+	want, err := os.ReadFile(filepath.Join("testdata", "golden_vpn_all_switch_off.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("switch-off (ledger wired) response drifted from golden.\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}

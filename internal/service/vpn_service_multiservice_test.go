@@ -82,10 +82,18 @@ func (f *fakeVPNStore) GetOtunUUIDByUserAndServicePartition(_ context.Context, u
 	return nil, nil
 }
 
-// 未被本测试触达的方法（resolveExisting* 不调用它们）。
-func (f *fakeVPNStore) GetCurrentByUser(_ context.Context, _ string) (*models.VPNProvision, error) {
+// GetCurrentByUser：不分面取最新 active current（模拟 created_at DESC；供单条 /status、/vpn 测试）。
+func (f *fakeVPNStore) GetCurrentByUser(_ context.Context, userID string) (*models.VPNProvision, error) {
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		if r.UserID == userID && r.IsCurrent && r.Status == models.VPNProvisionStatusActive {
+			return r, nil
+		}
+	}
 	return nil, nil
 }
+
+// 未被本测试触达的方法（resolveExisting* 不调用它们）。
 func (f *fakeVPNStore) GetByID(_ context.Context, _ string) (*models.VPNProvision, error) {
 	return nil, nil
 }
