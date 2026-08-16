@@ -177,6 +177,6 @@ type AdminEntitlementEntryView struct {
 
 // AdminUserVPNProfilesResponse GET /api/internal/admin/users/:user_id/vpn-profiles
 type AdminUserVPNProfilesResponse struct {
-	UserID string                                  `json:"user_id"`
+	UserID string                                   `json:"user_id"`
 	Faces  map[string][]AdminEntitlementProfileView `json:"faces"` // standard / residential
 }

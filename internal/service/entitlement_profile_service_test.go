@@ -157,7 +157,7 @@ func (f *fakeOtunGateway) ReadUsage(_ context.Context, otunUUID, _ string) (int6
 	return f.used[otunUUID], nil
 }
 
-func (f *fakeOtunGateway) Push(_ context.Context, otunUUID, face, _, _ string, trafficLimit int64, expireAt time.Time) error {
+func (f *fakeOtunGateway) Push(_ context.Context, otunUUID, face, _, _, _ string, trafficLimit int64, expireAt time.Time) error {
 	f.pushes = append(f.pushes, pushRecord{UUID: otunUUID, Face: face, TrafficLimit: trafficLimit, ExpireAt: expireAt})
 	return nil
 }
@@ -172,7 +172,7 @@ func (f *fakeOtunGateway) last() *pushRecord {
 // clock 可拨快的时钟。
 type clock struct{ t time.Time }
 
-func (c *clock) now() time.Time         { return c.t }
+func (c *clock) now() time.Time          { return c.t }
 func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 const GB = int64(1024 * 1024 * 1024)

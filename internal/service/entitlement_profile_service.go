@@ -45,8 +45,9 @@ type projectionStore interface {
 type otunAccountGateway interface {
 	// ReadUsage 读该面账号当前 traffic_used 真源（standard=users，residential=realm_users）。
 	ReadUsage(ctx context.Context, otunUUID, face string) (int64, error)
-	// Push 写 expire_at + traffic_limit 并显式 enabled=true。
-	Push(ctx context.Context, otunUUID, face, authUserID, email string, trafficLimit int64, expireAt time.Time) error
+	// Push 写 expire_at + traffic_limit 并显式 enabled=true；serviceTier 随投影行（套餐升降级时更新 tier，
+	// 与 syncOtunUserQuota 同口径）。
+	Push(ctx context.Context, otunUUID, face, serviceTier, authUserID, email string, trafficLimit int64, expireAt time.Time) error
 }
 
 // EntitlementProfileService 记账层服务。
@@ -122,7 +123,7 @@ func (a *otunAccountAdapter) ReadUsage(ctx context.Context, otunUUID, face strin
 	return u.TrafficUsed, nil
 }
 
-func (a *otunAccountAdapter) Push(ctx context.Context, otunUUID, face, authUserID, email string, trafficLimit int64, expireAt time.Time) error {
+func (a *otunAccountAdapter) Push(ctx context.Context, otunUUID, face, serviceTier, authUserID, email string, trafficLimit int64, expireAt time.Time) error {
 	if a == nil || a.c == nil {
 		return fmt.Errorf("otun client not configured")
 	}
@@ -142,6 +143,7 @@ func (a *otunAccountAdapter) Push(ctx context.Context, otunUUID, face, authUserI
 		TrafficLimit: trafficLimit,
 		ExpireAt:     expireAt.Format(time.RFC3339),
 		Enabled:      &enabled,
+		ServiceTier:  serviceTier, // 空则 manager 保留原值
 	})
 }
 
@@ -223,9 +225,10 @@ func classifyEntry(channel, purchaseType, businessType, channelSubID string) (cl
 }
 
 // entryIdempotencyKey 派生 source_event_id：ProvisionRequest 不带事件 ID，用
-//   订阅：sub:<subscription_id>|pe:<period_end>   —— 同一周期重放去重，续期（新 period_end）新条目
-//   一次性/赠送：sub:<subscription_id>            —— 同一笔订购只入桶一次（重放/重触发不重复加天）
-//   试用：sub:<subscription_id>|trial
+//
+//	订阅：sub:<subscription_id>|pe:<period_end>   —— 同一周期重放去重，续期（新 period_end）新条目
+//	一次性/赠送：sub:<subscription_id>            —— 同一笔订购只入桶一次（重放/重触发不重复加天）
+//	试用：sub:<subscription_id>|trial
 func entryIdempotencyKey(class, subscriptionID string, periodEnd *time.Time, granted time.Time) string {
 	switch class {
 	case models.EntitlementClassSubscription:
@@ -243,10 +246,11 @@ func entryIdempotencyKey(class, subscriptionID string, periodEnd *time.Time, gra
 // ==================== ApplyEntry ====================
 
 // ApplyEntry 把一笔条目折进对应 profile（幂等：条目唯一键冲突则不重复入账，返回 applied=false）。
-//   subscription → 订阅 profile：expire = max(period_end)、流量按本期重置
-//   one_time/gift → 订购桶：days_remaining += days、traffic_limit += traffic（生效中则 expire 顺延）
-//   trial → trial profile
-//   任何非 trial 条目到来 → 作废该面 trial profile（规则：任何付费到来即作废 trial）
+//
+//	subscription → 订阅 profile：expire = max(period_end)、流量按本期重置
+//	one_time/gift → 订购桶：days_remaining += days、traffic_limit += traffic（生效中则 expire 顺延）
+//	trial → trial profile
+//	任何非 trial 条目到来 → 作废该面 trial profile（规则：任何付费到来即作废 trial）
 func (s *EntitlementProfileService) ApplyEntry(ctx context.Context, in *EntryInput) (*models.EntitlementProfile, bool, error) {
 	if s == nil {
 		return nil, false, nil
@@ -446,8 +450,10 @@ func (r *resolveResult) active() *models.EntitlementProfile {
 }
 
 // Resolve 生效裁决（契约 §3，服务端唯一实现，只看时间不看流量）：
-//   订阅有效 → subscription；否则桶 days_remaining>0 → purchase（进入时 active_since=now、记流量基线）；
-//   否则 trial 有效 → trial；否则 none。
+//
+//	订阅有效 → subscription；否则桶 days_remaining>0 → purchase（进入时 active_since=now、记流量基线）；
+//	否则 trial 有效 → trial；否则 none。
+//
 // 回切（purchase→subscription）结算：days_remaining 取瞬间值、traffic_used += otun.used-baseline、days_consumed 累加。
 func (s *EntitlementProfileService) Resolve(ctx context.Context, userID, face string) (*resolveResult, error) {
 	if s == nil {
@@ -679,7 +685,7 @@ func (s *EntitlementProfileService) Sync(ctx context.Context, userID, face strin
 	s.pushMu.Unlock()
 	if doPush && (res.Changed || needProjection || bridging) && !(seen && last == desired) &&
 		vp.OtunUUID != nil && *vp.OtunUUID != "" {
-		if err := s.otun.Push(ctx, *vp.OtunUUID, face, userID, vp.Email, pushLimit, pushExpire); err != nil {
+		if err := s.otun.Push(ctx, *vp.OtunUUID, face, vp.ServiceTier, userID, vp.Email, pushLimit, pushExpire); err != nil {
 			log.Printf("[Entitlement] Sync push failed user=%s face=%s uuid=%s: %v", userID, face, *vp.OtunUUID, err)
 			return res, fmt.Errorf("sync otun account: %w", err)
 		}
