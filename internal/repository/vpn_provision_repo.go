@@ -19,11 +19,16 @@ func NewVPNProvisionRepository(pool *pgxpool.Pool) *VPNProvisionRepository {
 	return &VPNProvisionRepository{pool: pool}
 }
 
+// vpnColumns：★迁移 010 起含 product_face（分区键）。上线顺序：迁移先于本代码。
 const vpnColumns = `id, user_id, subscription_id, channel,
 	business_type, service_tier, otun_uuid, plan_tier, status,
 	traffic_limit, traffic_used, expire_at,
 	email, device_id, granted_by, note, is_current,
-	created_at, updated_at`
+	created_at, updated_at, COALESCE(product_face, 'basic')`
+
+// notCampaign 是不分区（user 级）查询的默认谓词：campaign 面对 basic/residential 的既有读写路径
+// 完全不可见（IMPL_PROMPT §2 "basic 分区显式排除 campaign" + 契约 C2）。
+const notCampaign = ` AND COALESCE(product_face, 'basic') <> 'campaign'`
 
 func (r *VPNProvisionRepository) Create(ctx context.Context, vp *models.VPNProvision) error {
 	query := `
@@ -31,19 +36,26 @@ func (r *VPNProvisionRepository) Create(ctx context.Context, vp *models.VPNProvi
 			id, user_id, subscription_id, channel,
 			business_type, service_tier, otun_uuid, plan_tier, status,
 			traffic_limit, traffic_used, expire_at,
-			email, device_id, granted_by, note, is_current
+			email, device_id, granted_by, note, is_current,
+			product_face
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7, $8, $9,
 			$10, $11, $12,
-			$13, $14, $15, $16, $17
+			$13, $14, $15, $16, $17,
+			$18
 		)
 	`
+	// product_face 缺省按 (plan_tier, service_tier) 推导（与迁移 010 回填口径一致）。
+	if vp.ProductFace == "" {
+		vp.ProductFace = models.ProductFaceFor(vp.PlanTier, vp.ServiceTier)
+	}
 	_, err := r.pool.Exec(ctx, query,
 		vp.ID, vp.UserID, vp.SubscriptionID, vp.Channel,
 		vp.BusinessType, vp.ServiceTier, vp.OtunUUID, vp.PlanTier, vp.Status,
 		vp.TrafficLimit, vp.TrafficUsed, vp.ExpireAt,
 		vp.Email, vp.DeviceID, vp.GrantedBy, vp.Note, vp.IsCurrent,
+		vp.ProductFace,
 	)
 	if err != nil {
 		return fmt.Errorf("insert vpn_provision: %w", err)
@@ -59,7 +71,7 @@ func (r *VPNProvisionRepository) GetByID(ctx context.Context, id string) (*model
 func (r *VPNProvisionRepository) GetCurrentByUser(ctx context.Context, userID string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE user_id = $1 AND is_current = TRUE AND status = 'active'
+		WHERE user_id = $1 AND is_current = TRUE AND status = 'active'`+notCampaign+`
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, vpnColumns)
@@ -69,7 +81,7 @@ func (r *VPNProvisionRepository) GetCurrentByUser(ctx context.Context, userID st
 func (r *VPNProvisionRepository) GetCurrentByUserAnyStatus(ctx context.Context, userID string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE user_id = $1 AND is_current = TRUE
+		WHERE user_id = $1 AND is_current = TRUE`+notCampaign+`
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, vpnColumns)
@@ -85,13 +97,21 @@ func (r *VPNProvisionRepository) GetCurrentByUserAnyStatus(ctx context.Context, 
 // 让 residential 与 standard 两条 current 记录互不命中，从而不再互相覆盖。
 // 原方法 GetCurrentByUserAnyStatus 的签名/SQL 保持不变（开关 false 仍走它，零回归）。
 func (r *VPNProvisionRepository) GetCurrentByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*models.VPNProvision, error) {
+	return r.GetCurrentByUserAndFace(ctx, userID, models.PartitionFace(isResidential))
+}
+
+// GetCurrentByUserAndFace 按产品面（迁移 010 product_face）取该 user 的 current provision。
+// ★2026-08-16 第三产品面 campaign：分区谓词从 (service_tier='residential')=$2 改为 product_face=$2，
+// 否则 campaign 行（service_tier='standard'）会被 basic 分区命中并可能成为 basic 的 current（串面）。
+// 所有 *AndServicePartition 方法都收口到 *AndFace（basic ↔ isResidential=false，residential ↔ true）。
+func (r *VPNProvisionRepository) GetCurrentByUserAndFace(ctx context.Context, userID, face string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE user_id = $1 AND is_current = TRUE AND (service_tier = 'residential') = $2
+		WHERE user_id = $1 AND is_current = TRUE AND COALESCE(product_face, 'basic') = $2
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, vpnColumns)
-	return r.scanOne(r.pool.QueryRow(ctx, query, userID, isResidential))
+	return r.scanOne(r.pool.QueryRow(ctx, query, userID, face))
 }
 
 // GetOtunUUIDByUserAndServicePartition 是 GetOtunUUIDByUser 的分区版（MULTI_SERVICE_ENABLED=true 才用）。
@@ -99,15 +119,20 @@ func (r *VPNProvisionRepository) GetCurrentByUserAndServicePartition(ctx context
 // 从而 residential 走 CreateUser 新建独立 UUID（otun-manager 据此写独立 realm_users 表），
 // 而不是复用 standard users.uuid。原方法 GetOtunUUIDByUser 不变。
 func (r *VPNProvisionRepository) GetOtunUUIDByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*string, error) {
+	return r.GetOtunUUIDByUserAndFace(ctx, userID, models.PartitionFace(isResidential))
+}
+
+// GetOtunUUIDByUserAndFace 按产品面取可复用 otun_uuid（campaign 面永不复用其它面的 uuid，反之亦然）。
+func (r *VPNProvisionRepository) GetOtunUUIDByUserAndFace(ctx context.Context, userID, face string) (*string, error) {
 	query := `
 		SELECT otun_uuid FROM fulfillment.vpn_provisions
 		WHERE user_id = $1 AND otun_uuid IS NOT NULL AND otun_uuid != ''
-		  AND (service_tier = 'residential') = $2
+		  AND COALESCE(product_face, 'basic') = $2
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
 	var otunUUID *string
-	err := r.pool.QueryRow(ctx, query, userID, isResidential).Scan(&otunUUID)
+	err := r.pool.QueryRow(ctx, query, userID, face).Scan(&otunUUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -122,19 +147,24 @@ func (r *VPNProvisionRepository) GetOtunUUIDByUserAndServicePartition(ctx contex
 // 但若同一 subscription_id 跨 service_type，幂等短路也按分区取记录，避免 residential 请求命中
 // standard 的 subscription provision 而被错误短路。原方法 GetBySubscriptionID 不变。
 func (r *VPNProvisionRepository) GetBySubscriptionIDAndServicePartition(ctx context.Context, subscriptionID string, isResidential bool) (*models.VPNProvision, error) {
+	return r.GetBySubscriptionIDAndFace(ctx, subscriptionID, models.PartitionFace(isResidential))
+}
+
+// GetBySubscriptionIDAndFace 按产品面取该订阅的 current provision（幂等短路用）。
+func (r *VPNProvisionRepository) GetBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE subscription_id = $1 AND is_current = TRUE AND (service_tier = 'residential') = $2
+		WHERE subscription_id = $1 AND is_current = TRUE AND COALESCE(product_face, 'basic') = $2
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, vpnColumns)
-	return r.scanOne(r.pool.QueryRow(ctx, query, subscriptionID, isResidential))
+	return r.scanOne(r.pool.QueryRow(ctx, query, subscriptionID, face))
 }
 
 func (r *VPNProvisionRepository) GetBySubscriptionID(ctx context.Context, subscriptionID string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE subscription_id = $1 AND is_current = TRUE
+		WHERE subscription_id = $1 AND is_current = TRUE`+notCampaign+`
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, vpnColumns)
@@ -144,7 +174,7 @@ func (r *VPNProvisionRepository) GetBySubscriptionID(ctx context.Context, subscr
 func (r *VPNProvisionRepository) GetByUserAndBusinessType(ctx context.Context, userID, businessType string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE user_id = $1 AND business_type = $2
+		WHERE user_id = $1 AND business_type = $2`+notCampaign+`
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, vpnColumns)
@@ -154,7 +184,7 @@ func (r *VPNProvisionRepository) GetByUserAndBusinessType(ctx context.Context, u
 func (r *VPNProvisionRepository) GetOtunUUIDByUser(ctx context.Context, userID string) (*string, error) {
 	query := `
 		SELECT otun_uuid FROM fulfillment.vpn_provisions
-		WHERE user_id = $1 AND otun_uuid IS NOT NULL AND otun_uuid != ''
+		WHERE user_id = $1 AND otun_uuid IS NOT NULL AND otun_uuid != ''` + notCampaign + `
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
@@ -179,16 +209,20 @@ func (r *VPNProvisionRepository) Update(ctx context.Context, vp *models.VPNProvi
 			otun_uuid = $5, plan_tier = $6, status = $7,
 			traffic_limit = $8, traffic_used = $9, expire_at = $10,
 			email = $11, device_id = $12, granted_by = $13, note = $14,
-			is_current = $15, updated_at = NOW()
+			is_current = $15, updated_at = NOW(),
+			product_face = $17
 		WHERE id = $16
 	`
+	// product_face 随 (plan_tier, service_tier) 重算：旧路径原地续期/升降级会改 service_tier
+	//（standard↔residential），分区键必须跟着走（与旧谓词 (service_tier='residential') 语义等价）。
+	vp.ProductFace = models.ProductFaceFor(vp.PlanTier, vp.ServiceTier)
 	_, err := r.pool.Exec(ctx, query,
 		vp.SubscriptionID, vp.Channel,
 		vp.BusinessType, vp.ServiceTier,
 		vp.OtunUUID, vp.PlanTier, vp.Status,
 		vp.TrafficLimit, vp.TrafficUsed, vp.ExpireAt,
 		vp.Email, vp.DeviceID, vp.GrantedBy, vp.Note,
-		vp.IsCurrent, vp.ID,
+		vp.IsCurrent, vp.ID, vp.ProductFace,
 	)
 	if err != nil {
 		return fmt.Errorf("update vpn_provision: %w", err)
@@ -283,7 +317,7 @@ func (r *VPNProvisionRepository) scanOne(row pgx.Row) (*models.VPNProvision, err
 		&vp.BusinessType, &vp.ServiceTier, &vp.OtunUUID, &vp.PlanTier, &vp.Status,
 		&vp.TrafficLimit, &vp.TrafficUsed, &vp.ExpireAt,
 		&vp.Email, &vp.DeviceID, &vp.GrantedBy, &vp.Note, &vp.IsCurrent,
-		&vp.CreatedAt, &vp.UpdatedAt,
+		&vp.CreatedAt, &vp.UpdatedAt, &vp.ProductFace,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -303,7 +337,7 @@ func (r *VPNProvisionRepository) scanMany(rows pgx.Rows) ([]*models.VPNProvision
 			&vp.BusinessType, &vp.ServiceTier, &vp.OtunUUID, &vp.PlanTier, &vp.Status,
 			&vp.TrafficLimit, &vp.TrafficUsed, &vp.ExpireAt,
 			&vp.Email, &vp.DeviceID, &vp.GrantedBy, &vp.Note, &vp.IsCurrent,
-			&vp.CreatedAt, &vp.UpdatedAt,
+			&vp.CreatedAt, &vp.UpdatedAt, &vp.ProductFace,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan vpn_provision row: %w", err)

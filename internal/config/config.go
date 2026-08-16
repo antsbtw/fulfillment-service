@@ -28,6 +28,18 @@ type Config struct {
 	Trial          TrialConfig
 	MultiService   MultiServiceConfig
 	Entitlement    EntitlementConfig
+	Campaign       CampaignConfig
+}
+
+// CampaignConfig 第三产品面 campaign（document/marketing-campaign/*）。
+//   - StackHardMaxDays / StackHardMaxTrafficGB：全局叠加硬上限（与 campaign-service 同名 env 同源，
+//     8 周 / 200G 默认），只用于 /vpn/all campaign 元素的 stack_limit 展示；真正的拒领在 campaign-service。
+//   - RetentionDays：活动账号到期后保留期（契约 C5，默认 7 天）：期内 /vpn/all 仍下发 status=expired，
+//     之后 cleanup 标记 is_current=false 并 deprovision otun 账号，不再下发。
+type CampaignConfig struct {
+	StackHardMaxDays      int
+	StackHardMaxTrafficGB int
+	RetentionDays         int
 }
 
 // EntitlementConfig 订阅/订购 profile 记账层开关（document/subscription-entitlement/*）。
@@ -157,6 +169,11 @@ func Load() *Config {
 		Entitlement: EntitlementConfig{
 			Enabled:    getEnv("ENTITLEMENT_PROFILES_ENABLED", "false") == "true",
 			SwitchLead: time.Duration(getEnvInt("ENTITLEMENT_SWITCH_LEAD_MINUTES", 65)) * time.Minute,
+		},
+		Campaign: CampaignConfig{
+			StackHardMaxDays:      getEnvInt("CAMPAIGN_STACK_HARD_MAX_WEEKS", 8) * 7,
+			StackHardMaxTrafficGB: getEnvInt("CAMPAIGN_STACK_HARD_MAX_TRAFFIC_GB", 200),
+			RetentionDays:         getEnvInt("CAMPAIGN_RETENTION_DAYS", 7),
 		},
 	}
 

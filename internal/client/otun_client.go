@@ -41,6 +41,9 @@ type CreateVPNUserRequest struct {
 	TrafficLimit int64    `json:"traffic_limit"`
 	ExpireAt     string   `json:"expire_at"`
 	ServiceTier  string   `json:"service_tier,omitempty"` // basic, premium, residential
+	// ProductFace 产品面（otun-manager users.product_face，迁移 034）：basic(缺省) / campaign。
+	// otun 侧 (auth_user_id, product_face) 唯一——campaign 活动账号与 basic 账号同 auth_user_id 并存。
+	ProductFace string `json:"product_face,omitempty"`
 }
 
 // CreateVPNUserResponse is the response from creating a VPN user

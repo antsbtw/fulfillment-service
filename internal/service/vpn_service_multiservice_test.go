@@ -15,15 +15,46 @@ type fakeVPNStore struct {
 	rows []*models.VPNProvision
 }
 
-func (f *fakeVPNStore) isResidentialTier(t string) bool {
-	return t == models.ServiceTierResidential
+// faceOf 模拟迁移 010 的分区键：优先行上的 ProductFace，空则按 (plan_tier, service_tier) 推导
+//（与回填口径一致）。老测试构造的行没填 ProductFace，仍按 service_tier 落到 basic/residential。
+func faceOf(r *models.VPNProvision) string { return r.EffectiveProductFace() }
+
+// GetCurrentByUserAndFace / GetOtunUUIDByUserAndFace / GetBySubscriptionIDAndFace：按产品面分区。
+func (f *fakeVPNStore) GetCurrentByUserAndFace(_ context.Context, userID, face string) (*models.VPNProvision, error) {
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		if r.UserID == userID && r.IsCurrent && faceOf(r) == face {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeVPNStore) GetOtunUUIDByUserAndFace(_ context.Context, userID, face string) (*string, error) {
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		if r.UserID == userID && r.OtunUUID != nil && *r.OtunUUID != "" && faceOf(r) == face {
+			return r.OtunUUID, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeVPNStore) GetBySubscriptionIDAndFace(_ context.Context, subID, face string) (*models.VPNProvision, error) {
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		if r.SubscriptionID == subID && r.IsCurrent && faceOf(r) == face {
+			return r, nil
+		}
+	}
+	return nil, nil
 }
 
 // 原（非分区）查询：取该 user 任意 service_tier 的 current 记录（最后一条优先，模拟 created_at DESC）。
 func (f *fakeVPNStore) GetCurrentByUserAnyStatus(_ context.Context, userID string) (*models.VPNProvision, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {
 		r := f.rows[i]
-		if r.UserID == userID && r.IsCurrent {
+		if r.UserID == userID && r.IsCurrent && faceOf(r) != models.ProductFaceCampaign {
 			return r, nil
 		}
 	}
@@ -33,7 +64,7 @@ func (f *fakeVPNStore) GetCurrentByUserAnyStatus(_ context.Context, userID strin
 func (f *fakeVPNStore) GetBySubscriptionID(_ context.Context, subID string) (*models.VPNProvision, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {
 		r := f.rows[i]
-		if r.SubscriptionID == subID && r.IsCurrent {
+		if r.SubscriptionID == subID && r.IsCurrent && faceOf(r) != models.ProductFaceCampaign {
 			return r, nil
 		}
 	}
@@ -43,7 +74,7 @@ func (f *fakeVPNStore) GetBySubscriptionID(_ context.Context, subID string) (*mo
 func (f *fakeVPNStore) GetOtunUUIDByUser(_ context.Context, userID string) (*string, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {
 		r := f.rows[i]
-		if r.UserID == userID && r.OtunUUID != nil && *r.OtunUUID != "" {
+		if r.UserID == userID && r.OtunUUID != nil && *r.OtunUUID != "" && faceOf(r) != models.ProductFaceCampaign {
 			return r.OtunUUID, nil
 		}
 	}
@@ -51,42 +82,23 @@ func (f *fakeVPNStore) GetOtunUUIDByUser(_ context.Context, userID string) (*str
 }
 
 // 分区查询：在原条件上叠加 (service_tier='residential')==isResidential。
-func (f *fakeVPNStore) GetCurrentByUserAndServicePartition(_ context.Context, userID string, isResidential bool) (*models.VPNProvision, error) {
-	for i := len(f.rows) - 1; i >= 0; i-- {
-		r := f.rows[i]
-		if r.UserID == userID && r.IsCurrent && f.isResidentialTier(r.ServiceTier) == isResidential {
-			return r, nil
-		}
-	}
-	return nil, nil
+func (f *fakeVPNStore) GetCurrentByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*models.VPNProvision, error) {
+	return f.GetCurrentByUserAndFace(ctx, userID, models.PartitionFace(isResidential))
 }
 
-func (f *fakeVPNStore) GetBySubscriptionIDAndServicePartition(_ context.Context, subID string, isResidential bool) (*models.VPNProvision, error) {
-	for i := len(f.rows) - 1; i >= 0; i-- {
-		r := f.rows[i]
-		if r.SubscriptionID == subID && r.IsCurrent && f.isResidentialTier(r.ServiceTier) == isResidential {
-			return r, nil
-		}
-	}
-	return nil, nil
+func (f *fakeVPNStore) GetBySubscriptionIDAndServicePartition(ctx context.Context, subID string, isResidential bool) (*models.VPNProvision, error) {
+	return f.GetBySubscriptionIDAndFace(ctx, subID, models.PartitionFace(isResidential))
 }
 
-func (f *fakeVPNStore) GetOtunUUIDByUserAndServicePartition(_ context.Context, userID string, isResidential bool) (*string, error) {
-	for i := len(f.rows) - 1; i >= 0; i-- {
-		r := f.rows[i]
-		if r.UserID == userID && r.OtunUUID != nil && *r.OtunUUID != "" &&
-			f.isResidentialTier(r.ServiceTier) == isResidential {
-			return r.OtunUUID, nil
-		}
-	}
-	return nil, nil
+func (f *fakeVPNStore) GetOtunUUIDByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*string, error) {
+	return f.GetOtunUUIDByUserAndFace(ctx, userID, models.PartitionFace(isResidential))
 }
 
 // GetCurrentByUser：不分面取最新 active current（模拟 created_at DESC；供单条 /status、/vpn 测试）。
 func (f *fakeVPNStore) GetCurrentByUser(_ context.Context, userID string) (*models.VPNProvision, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {
 		r := f.rows[i]
-		if r.UserID == userID && r.IsCurrent && r.Status == models.VPNProvisionStatusActive {
+		if r.UserID == userID && r.IsCurrent && r.Status == models.VPNProvisionStatusActive && faceOf(r) != models.ProductFaceCampaign {
 			return r, nil
 		}
 	}
@@ -94,7 +106,12 @@ func (f *fakeVPNStore) GetCurrentByUser(_ context.Context, userID string) (*mode
 }
 
 // 未被本测试触达的方法（resolveExisting* 不调用它们）。
-func (f *fakeVPNStore) GetByID(_ context.Context, _ string) (*models.VPNProvision, error) {
+func (f *fakeVPNStore) GetByID(_ context.Context, id string) (*models.VPNProvision, error) {
+	for _, r := range f.rows {
+		if r.ID == id {
+			return r, nil
+		}
+	}
 	return nil, nil
 }
 func (f *fakeVPNStore) Create(_ context.Context, vp *models.VPNProvision) error {

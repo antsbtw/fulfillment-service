@@ -79,6 +79,9 @@ func main() {
 		cfg.Entitlement.SwitchLead,
 	)
 
+	// 第三产品面 campaign 的入账台账（迁移 010 campaign_grants；document/marketing-campaign/*）
+	campaignGrantRepo := repository.NewCampaignGrantRepository(pool)
+
 	vpnService := service.NewVPNService(
 		cfg,
 		vpnRepo,
@@ -86,6 +89,7 @@ func main() {
 		otunClient,
 		subscriptionClient,
 		entitlementProfiles,
+		campaignGrantRepo,
 	)
 
 	entitlementService := service.NewEntitlementService(
@@ -112,6 +116,11 @@ func main() {
 		entitlementScheduler := service.NewEntitlementScheduler(entitlementProfiles, 1*time.Minute, cfg.Entitlement.SwitchLead)
 		go entitlementScheduler.Start(cleanupCtx)
 	}
+
+	// CampaignCleanupScheduler：活动账号到期 + 保留期（默认 7 天）后 is_current=false + otun disable（1h 一轮）
+	campaignCleanup := service.NewCampaignCleanupScheduler(vpnService, 1*time.Hour,
+		time.Duration(cfg.Campaign.RetentionDays)*24*time.Hour)
+	go campaignCleanup.Start(cleanupCtx)
 
 	// Initialize HTTP server
 	server := http.NewServer(cfg, pool, provisionService, vpnService, entitlementService, entitlementProfiles)
