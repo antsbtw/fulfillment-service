@@ -828,6 +828,7 @@ func (s *VPNService) GetUserVPNSubscribeConfig(ctx context.Context, userID strin
 	if err != nil || vp == nil {
 		return nil, fmt.Errorf("no active VPN provision")
 	}
+	s.resolveEntitlementForRead(ctx, userID, vp.ServiceTier == models.ServiceTierResidential)
 
 	return s.buildSubscribeResponse(ctx, vp, userID)
 }
@@ -1011,6 +1012,21 @@ func (s *VPNService) attachEntitlementProfiles(ctx context.Context, resp *models
 	}
 }
 
+// resolveEntitlementForRead 读前兜底：开关 true 时对该面 Resolve+Sync（幂等），覆盖调度器漏拍。
+// 失败只记日志，不影响读响应。
+func (s *VPNService) resolveEntitlementForRead(ctx context.Context, userID string, isResidential bool) {
+	if !s.entitlementEnabled() {
+		return
+	}
+	face := models.ServiceFaceStandard
+	if isResidential {
+		face = models.ServiceFaceResidential
+	}
+	if _, err := s.entitlement.Sync(ctx, userID, face); err != nil {
+		log.Printf("[VPNService] entitlement resolve-on-read failed user=%s face=%s: %v", userID, face, err)
+	}
+}
+
 // buildVPNRegions 把 otun 下发的授权集区域包映射成 /vpn/all 的 regions[]（契约 §2.1）。
 // 每区域 protocols = 该区域各节点 connect_urls 展开（node=role，复用 realmSchemeOf 口径）；
 // smart_strategy 原样整包透传（方向性红线：不拆包不混装）。空 → nil（老 otun 零回归）。
@@ -1149,6 +1165,7 @@ func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (
 	if err != nil || vp == nil {
 		return nil, fmt.Errorf("no active VPN subscription")
 	}
+	s.resolveEntitlementForRead(ctx, userID, vp.ServiceTier == models.ServiceTierResidential)
 	return s.buildQuickStatus(ctx, vp), nil
 }
 
@@ -1226,6 +1243,8 @@ func (s *VPNService) GetUserVPNSubscribeConfigAll(ctx context.Context, userID st
 
 	out := make([]*models.VPNSubscribeResponse, 0, len(servicePartitions))
 	for _, isResidential := range servicePartitions {
+		// ★读前兜底 Resolve+Sync（开关 true；幂等）——先于取投影行，保证行 = 裁决后的生效值。
+		s.resolveEntitlementForRead(ctx, userID, isResidential)
 		vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
 		if err != nil || vp == nil {
 			continue // 该面未持有
@@ -1246,6 +1265,7 @@ func (s *VPNService) GetUserVPNSubscribeConfigAll(ctx context.Context, userID st
 func (s *VPNService) GetUserVPNQuickStatusAll(ctx context.Context, userID string) ([]*models.VPNQuickStatus, error) {
 	out := make([]*models.VPNQuickStatus, 0, len(servicePartitions))
 	for _, isResidential := range servicePartitions {
+		s.resolveEntitlementForRead(ctx, userID, isResidential)
 		vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
 		if err != nil || vp == nil {
 			continue
