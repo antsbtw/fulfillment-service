@@ -326,6 +326,12 @@ type VPNSubscribeResponse struct {
 	// ★阶段2（契约 §2.1）：授权集全量（每项一个自包含区域包）。仅 residential 面填充，
 	// 标准面 nil→omitempty 不输出；不读新字段的老客户端行为不变（顶层字段 = 最近使用区域）。
 	Regions []VPNRegion `json:"regions,omitempty"`
+	// ★订阅/订购 profile（VPN_PROFILES_CONTRACT_DRAFT v0.2 §2，字段名冻结 §7）。仅
+	// ENTITLEMENT_PROFILES_ENABLED=true 时填充；false 时零值 omitempty 不输出（与改动前逐字节一致）。
+	// active_class：subscription | purchase | trial | none（服务端唯一裁决，端上只读，H5）。
+	// profiles[]：该面存在的 profile；端上不得依赖新增字段决定连接。既有 16 个字段一个不删（H9）。
+	ActiveClass string           `json:"active_class,omitempty"`
+	Profiles    []VPNProfileView `json:"profiles,omitempty"`
 }
 
 // VPNRegion 是 /vpn/all 下发的一个授权区域包（契约 §2.1）。
@@ -347,6 +353,10 @@ type VPNQuickStatus struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	TrafficUsed  int64  `json:"traffic_used"`
 	ExpireAt     string `json:"expire_at,omitempty"`
+	// ★entitlement profiles（契约 §5，可选）：仅开关 true 时填充。
+	ActiveClass string `json:"active_class,omitempty"`
+	// /status-all 元素补 service_tier（变更清单 §2.4 低优先，H8 非依赖）；仅开关 true 时填充。
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
 // VPNProtocol represents a single VPN protocol configuration.

@@ -90,7 +90,7 @@ var userRateLimiter = NewRateLimiter(30, time.Minute)
 // 说明: 业务规则限制每用户只能有一个托管节点，5 次足够处理重试和重建场景
 var createRateLimiter = NewRateLimiter(5, time.Hour)
 
-func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService) *Server {
+func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService, entitlementProfiles *service.EntitlementProfileService) *Server {
 	gin.SetMode(cfg.Server.Mode)
 	router := gin.New()
 
@@ -98,7 +98,7 @@ func NewServer(cfg *config.Config, db *pgxpool.Pool, provisionService *service.P
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
 
-	handler := NewHandler(provisionService, vpnService, entitlementService)
+	handler := NewHandler(provisionService, vpnService, entitlementService, entitlementProfiles)
 
 	s := &Server{
 		router:  router,
@@ -212,6 +212,9 @@ func (s *Server) setupRoutes() {
 	internalAdmin := s.router.Group("/api/internal/admin")
 	internalAdmin.Use(InternalAuthMiddleware(s.cfg.InternalSecret))
 	{
+		// 订阅/订购 profile 后台排障读口：两面 × profiles × entries（走 internal 鉴权）
+		internalAdmin.GET("/users/:user_id/vpn-profiles", s.handler.GetUserVPNProfiles)
+
 		// DB Browser API (通用数据库浏览)
 		dbAdminHandler := NewDBAdminHandler(s.db, "fulfillment")
 		dbAdmin := internalAdmin.Group("/db")

@@ -947,7 +947,7 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		smartStrategy = config.SmartStrategy
 	}
 
-	return &models.VPNSubscribeResponse{
+	resp := &models.VPNSubscribeResponse{
 		Status:        "active",
 		Channel:       vp.Channel,
 		PlanTier:      vp.PlanTier,
@@ -970,7 +970,45 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		//（授权集任何结构性变化必翻转，契约 §2.4）；无 regions 时哈希与现状逐字节一致（零回归）。
 		ConfigVersion: computeConfigVersionWithRegions(protocols, smartStrategy, vpnRegions),
 		Regions:       vpnRegions, // ★阶段2：授权集区域包（标准分支 nil→omitempty 不输出）
-	}, nil
+	}
+	// ★entitlement profiles（开关 true）：追加 active_class + profiles[]，既有字段按 H2 取生效 profile 值。
+	// 开关 false 不进此分支 → 响应与改动前逐字节一致（golden 测试锁定）。
+	s.attachEntitlementProfiles(ctx, resp, vp, trafficUsed)
+	return resp, nil
+}
+
+// attachEntitlementProfiles 把记账层投影挂到 /vpn 元素上（契约 §2）：
+//   - active_class / profiles[]（新增字段，omitempty）；
+//   - 既有字段（H2）：expire_at / traffic_limit / traffic_used = 生效 profile 的值；
+//     protocols/regions/nodes/subscribe_url/smart_strategy/config_version 属该面 otun 账号，不动；
+//   - none：顶层 status="expired"，expire_at = 最后生效 profile 的到期（不为 null）。
+// 记账层无该面 profile（如仅回填前的存量、或影子写尚未发生）→ 不动任何字段（零回归）。
+func (s *VPNService) attachEntitlementProfiles(ctx context.Context, resp *models.VPNSubscribeResponse, vp *models.VPNProvision, otunUsed int64) {
+	if !s.entitlementEnabled() || resp == nil || vp == nil {
+		return
+	}
+	face := models.ServiceFaceOf(vp.ServiceTier)
+	proj, err := s.entitlement.Project(ctx, vp.UserID, face, &otunUsed)
+	if err != nil {
+		log.Printf("[VPNService] entitlement Project failed user=%s face=%s: %v", vp.UserID, face, err)
+		return
+	}
+	if proj == nil || len(proj.Profiles) == 0 {
+		return
+	}
+	resp.ActiveClass = proj.ActiveClass
+	resp.Profiles = proj.Profiles
+	if proj.ExpireAt != nil {
+		resp.ExpireAt = proj.ExpireAt.UTC().Format(time.RFC3339)
+	}
+	if proj.ActiveClass == models.ActiveClassNone {
+		resp.Status = models.VPNProvisionStatusExpired
+	}
+	resp.TrafficLimit = proj.TrafficLimit
+	resp.TrafficUsed = proj.TrafficUsed
+	if proj.Channel != "" {
+		resp.Channel = proj.Channel
+	}
 }
 
 // buildVPNRegions 把 otun 下发的授权集区域包映射成 /vpn/all 的 regions[]（契约 §2.1）。
@@ -1126,11 +1164,39 @@ func (s *VPNService) buildQuickStatus(ctx context.Context, vp *models.VPNProvisi
 	}
 
 	// Get real-time traffic_used and expire_at from otun-manager
+	otunUsedKnown := false
 	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
 		syncResp, err := s.otunClient.SyncUser(ctx, *vp.OtunUUID)
 		if err == nil && syncResp != nil {
 			resp.ExpireAt = syncResp.ExpireAt
 			resp.TrafficUsed = syncResp.TrafficUsed
+			otunUsedKnown = true
+		}
+	}
+
+	// ★entitlement profiles（开关 true，契约 §5 / H3）：单条 status = 生效 profile 的
+	// status/expire_at/traffic_*；none 时 expire_at 不为 null；可选带 active_class + service_tier。
+	if s.entitlementEnabled() {
+		var usedHint *int64
+		if otunUsedKnown {
+			u := resp.TrafficUsed
+			usedHint = &u
+		}
+		face := models.ServiceFaceOf(vp.ServiceTier)
+		if proj, err := s.entitlement.Project(ctx, vp.UserID, face, usedHint); err == nil && proj != nil && len(proj.Profiles) > 0 {
+			resp.ActiveClass = proj.ActiveClass
+			resp.ServiceTier = vp.ServiceTier
+			resp.TrafficLimit = proj.TrafficLimit
+			resp.TrafficUsed = proj.TrafficUsed
+			if proj.ExpireAt != nil {
+				resp.ExpireAt = proj.ExpireAt.UTC().Format(time.RFC3339)
+			}
+			if proj.Channel != "" {
+				resp.Channel = proj.Channel
+			}
+			if proj.ActiveClass == models.ActiveClassNone {
+				resp.Status = models.VPNProvisionStatusExpired
+			}
 		}
 	}
 

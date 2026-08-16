@@ -13,16 +13,18 @@ import (
 )
 
 type Handler struct {
-	provisionService   *service.ProvisionService
-	vpnService         *service.VPNService
-	entitlementService *service.EntitlementService
+	provisionService    *service.ProvisionService
+	vpnService          *service.VPNService
+	entitlementService  *service.EntitlementService
+	entitlementProfiles *service.EntitlementProfileService
 }
 
-func NewHandler(provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService) *Handler {
+func NewHandler(provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService, entitlementProfiles *service.EntitlementProfileService) *Handler {
 	return &Handler{
-		provisionService:   provisionService,
-		vpnService:         vpnService,
-		entitlementService: entitlementService,
+		provisionService:    provisionService,
+		vpnService:          vpnService,
+		entitlementService:  entitlementService,
+		entitlementProfiles: entitlementProfiles,
 	}
 }
 
@@ -718,4 +720,24 @@ func (h *Handler) ListEntitlements(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"entitlements": resp})
+}
+
+// GetUserVPNProfiles 后台排障读口：GET /api/internal/admin/users/:user_id/vpn-profiles
+// 返回该用户两面（standard/residential）的 entitlement profiles + entries（记账层原样，不做裁决）。
+func (h *Handler) GetUserVPNProfiles(c *gin.Context) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+	if h.entitlementProfiles == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "error": "entitlement profiles not configured"})
+		return
+	}
+	resp, err := h.entitlementProfiles.AdminView(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": resp})
 }
