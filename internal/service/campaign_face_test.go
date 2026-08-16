@@ -102,6 +102,7 @@ type fakeOtun struct {
 	posts   []client.CreateVPNUserRequest
 	puts    []client.UpdateVPNUserRequest
 	putUUID []string
+	putFail int // >0 时 PUT 返回 500（次数递减）
 	syncFn  func(uuid string) (int, string)
 	srv     *httptest.Server
 }
@@ -146,6 +147,15 @@ func newFakeOtun(t *testing.T) *fakeOtun {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPut:
+			f.mu.Lock()
+			if f.putFail > 0 {
+				f.putFail--
+				f.mu.Unlock()
+				w.WriteHeader(500)
+				_, _ = w.Write([]byte(`{"error":"otun down"}`))
+				return
+			}
+			f.mu.Unlock()
 			var req client.UpdateVPNUserRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			f.mu.Lock()
@@ -434,7 +444,18 @@ func TestCampaign_ProvisionStackingAndRevoke(t *testing.T) {
 	if agg.ClaimsActive != 2 || agg.GrantedDaysTotal != 14 || agg.GrantedTrafficTotal != 20*GB {
 		t.Fatalf("grants aggregate: %+v", agg)
 	}
-	// 5.4 撤销 c1：expire -= 7d，traffic -= 10G；再撤 → noop；撤不存在 grant → noop
+	// 5.4a（验收 F4）otun PUT 失败 → 撤销整体失败：grant 仍 active、行不变、可重试
+	otun.putFail = 1
+	if _, err := s.RevokeCampaign(ctx, &CampaignRevokeRequest{UserID: userID, SubscriptionID: "c1", Days: 7, TrafficBytes: 10 * GB}); err == nil {
+		t.Fatalf("revoke must fail when otun PUT fails")
+	}
+	if g, _ := grants.GetBySubscriptionID(ctx, "c1"); g.Status != "active" {
+		t.Fatalf("grant must stay active after failed otun sync, got %s", g.Status)
+	}
+	if camp.TrafficLimit != 20*GB || !camp.ExpireAt.Equal(exp1.AddDate(0, 0, 7)) {
+		t.Fatalf("row must be untouched after failed otun sync: %d %v", camp.TrafficLimit, camp.ExpireAt)
+	}
+	// 5.4 撤销 c1（重试成功）：expire -= 7d，traffic -= 10G；再撤 → noop；撤不存在 grant → noop
 	res, err := s.RevokeCampaign(ctx, &CampaignRevokeRequest{UserID: userID, SubscriptionID: "c1", Days: 7, TrafficBytes: 10 * GB})
 	if err != nil || res.Noop || res.RevokedDays != 7 || res.TrafficLimit != 10*GB {
 		t.Fatalf("revoke: %+v err=%v", res, err)

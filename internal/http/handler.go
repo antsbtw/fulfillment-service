@@ -95,10 +95,12 @@ func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {
 	if req.Reason == "" {
 		req.Reason = "subscription reassigned to another account"
 	}
-	isResidential := req.IsResidential
-	if isResidential == nil && req.PlanTier != "" {
-		v := models.MapPlanToServiceTier(req.PlanTier) == models.ServiceTierResidential
-		isResidential = &v
+	// ★验收 F3：plan_tier=campaign 走 MapPlanToServiceTier 会折成 standard 命中 basic 行（串面）。
+	// 活动账号不参与换绑/回收（有自己的 revoke 口），按产品面判定：campaign → 400 拒绝。
+	isResidential, reject := deprovisionPartitionFor(req.PlanTier, req.IsResidential)
+	if reject {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "campaign face is not deprovisionable via reassign; use /api/internal/vpn/campaign/revoke"})
+		return
 	}
 
 	if err := h.vpnService.DeprovisionVPNByUser(c.Request.Context(), userID, req.Reason, isResidential); err != nil {
@@ -111,6 +113,23 @@ func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "deprovisioned", "user_id": userID})
+}
+
+// deprovisionPartitionFor 把换绑回收请求折成分区参数：显式 is_residential 优先；否则按 plan_tier 的
+// 【产品面】（MapPlanToProductFace）判定——residential → true，basic/premium/unlimited → false，
+// campaign → reject（活动账号不在换绑语义内，且按 service_tier 折算会串到 basic 面）。两者都缺 → nil（旧行为）。
+func deprovisionPartitionFor(planTier string, explicit *bool) (isResidential *bool, reject bool) {
+	if planTier != "" && models.MapPlanToProductFace(planTier) == models.ProductFaceCampaign {
+		return nil, true
+	}
+	if explicit != nil {
+		return explicit, false
+	}
+	if planTier == "" {
+		return nil, false
+	}
+	v := models.MapPlanToProductFace(planTier) == models.ProductFaceResidential
+	return &v, false
 }
 
 func (h *Handler) DeprovisionOBox(c *gin.Context) {

@@ -38,6 +38,12 @@ func main() {
 	}
 	defer pool.Close()
 
+	// 迁移 010（vpn_provisions.product_face + campaign_grants）与新码原子上线（验收 F2/F5）：启动即幂等确保 + 回填。
+	if err := db.EnsureCampaignSchema(context.Background(), pool); err != nil {
+		log.Fatalf("Failed to ensure campaign schema (migration 010): %v", err)
+	}
+	log.Println("vpn_provisions.product_face / campaign_grants schema ensured (migration 010)")
+
 	// Initialize repositories
 	hostingRepo := repository.NewHostingProvisionRepository(pool)
 	vpnRepo := repository.NewVPNProvisionRepository(pool)

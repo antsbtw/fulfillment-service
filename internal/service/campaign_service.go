@@ -309,11 +309,8 @@ func (s *VPNService) RevokeCampaign(ctx context.Context, req *CampaignRevokeRequ
 		if bytes <= 0 {
 			bytes = g.TrafficBytes
 		}
-		if ok, merr := s.campaignGrants.MarkRevoked(ctx, req.SubscriptionID); merr != nil {
-			return nil, fmt.Errorf("mark campaign grant revoked: %w", merr)
-		} else if !ok {
-			return &CampaignRevokeResult{UserID: req.UserID, ExpireAt: fmtTime(vp.ExpireAt), TrafficLimit: vp.TrafficLimit, Noop: true}, nil
-		}
+		// ★验收 F4：MarkRevoked 放到 otun 同步成功之后（见下）——否则 otun PUT 失败时 grant 已标 revoked，
+		// subscription-service 重试进来变 Noop，otun 仍全额。
 	}
 	now := time.Now()
 	newExpire := now
@@ -337,7 +334,17 @@ func (s *VPNService) RevokeCampaign(ctx context.Context, req *CampaignRevokeRequ
 		if err := s.otunClient.UpdateUser(ctx, *vp.OtunUUID, &client.UpdateVPNUserRequest{
 			TrafficLimit: otunLimit, ExpireAt: newExpire.Format(time.RFC3339),
 		}); err != nil {
-			log.Printf("[VPNService] Warning: sync revoked campaign quota to otun failed uuid=%s: %v", *vp.OtunUUID, err)
+			// otun 未扣成 → 整个撤销失败（不标 grant、不改行），让 subscription-service 回滚状态并由
+			// campaign-service 重试（验收 F4）。
+			return nil, fmt.Errorf("sync revoked campaign quota to otun failed: %w", err)
+		}
+	}
+	// otun 已扣成，再按 grant 幂等标记（并发重复撤销：第二个到这里发现已 revoked → 只回 Noop，不再改行）。
+	if req.SubscriptionID != "" && s.campaignGrants != nil {
+		if ok, merr := s.campaignGrants.MarkRevoked(ctx, req.SubscriptionID); merr != nil {
+			return nil, fmt.Errorf("mark campaign grant revoked: %w", merr)
+		} else if !ok {
+			return &CampaignRevokeResult{UserID: req.UserID, ExpireAt: fmtTime(vp.ExpireAt), TrafficLimit: vp.TrafficLimit, Noop: true}, nil
 		}
 	}
 	vp.ExpireAt = &newExpire
