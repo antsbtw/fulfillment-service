@@ -638,7 +638,7 @@ func TestClassifyEntry_KindMapping(t *testing.T) {
 		{"stripe", "subscription", "", "", "subscription", "stripe"},
 		{"stripe", "one_time", "", "", "purchase", "stripe_onetime"},
 		{"credit", "one_time", "", "order-1", "purchase", "credit"},
-		{"credit", "one_time", "", "campaign-claim-abc", "purchase", "campaign"},
+		{"credit", "one_time", "", "campaign-claim-abc", "purchase", "promo"},
 		{"gift", "gift", "gift", "", "purchase", "gift"},
 		{"gift_card", "one_time", "", "", "purchase", "gift_card"},
 		{"manual", "one_time", "", "", "purchase", "manual"},

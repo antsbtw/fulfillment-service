@@ -31,11 +31,23 @@ const (
 const (
 	ProductFaceBasic       = "basic"
 	ProductFaceResidential = "residential"
-	ProductFaceCampaign    = "campaign"
+	ProductFaceCampaign    = "promo" // ★2026-08-20 改名：与 credit-service GiftCampaign 区分（Q3）；DB 存量由迁移 011 UPDATE
 )
 
 // PlanTierCampaign 第三产品面的 plan_tier / channel 枚举（契约 §8 冻结）。
-const PlanTierCampaign = "campaign"
+const PlanTierCampaign = "promo"
+
+// PlanTierCampaignLegacy 是改名前的旧值（2026-08-20 之前）。
+// ★只用于【入参识别】，绝不用于下发或落库：改名与各服务滚动上线之间存在窗口，期间
+// campaign-service 可能仍发 plan_tier="campaign"。若不认这个旧值，MapPlanToProductFace 会
+// 把它 default 成 basic → 活动请求落进 basic 面（正是本次改名要防的串面）。
+// 各服务全部滚完且确认无旧值流量后可移除。
+const PlanTierCampaignLegacy = "campaign"
+
+// IsCampaignPlanTier 判定 plan_tier/channel 是否指第三产品面（含改名前旧值）。
+func IsCampaignPlanTier(v string) bool {
+	return v == PlanTierCampaign || v == PlanTierCampaignLegacy
+}
 
 // VPNProvision represents a VPN user provision record (otun)
 // Merges the old resources (vpn_user) and entitlements tables
@@ -104,10 +116,10 @@ func MapPlanToServiceTier(planTier string) string {
 // MapPlanToProductFace maps plan_tier to the vpn_provisions partition key（迁移 010）：
 // basic/premium/unlimited → basic；residential → residential；campaign → campaign。
 func MapPlanToProductFace(planTier string) string {
-	switch planTier {
-	case "residential":
+	switch {
+	case planTier == "residential":
 		return ProductFaceResidential
-	case PlanTierCampaign:
+	case IsCampaignPlanTier(planTier): // 含改名前旧值，滚动窗口内不串面
 		return ProductFaceCampaign
 	default:
 		return ProductFaceBasic
@@ -117,7 +129,7 @@ func MapPlanToProductFace(planTier string) string {
 // ProductFaceFor 由 (plan_tier, service_tier) 推导产品面：campaign 优先看 plan_tier；其余沿旧分区
 // 谓词 (service_tier='residential') 的口径——与迁移 010 的存量回填完全一致。
 func ProductFaceFor(planTier, serviceTier string) string {
-	if planTier == PlanTierCampaign {
+	if IsCampaignPlanTier(planTier) { // 含改名前旧值
 		return ProductFaceCampaign
 	}
 	if serviceTier == ServiceTierResidential {

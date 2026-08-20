@@ -97,7 +97,7 @@ func (r *CampaignGrantRepository) AggregateActiveByUser(ctx context.Context, use
 func (r *VPNProvisionRepository) ListExpiredCampaignRows(ctx context.Context, before time.Time, limit int) ([]*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions
-		WHERE product_face = 'campaign' AND is_current = TRUE
+		WHERE product_face = 'promo' AND is_current = TRUE
 		  AND expire_at IS NOT NULL AND expire_at < $1
 		ORDER BY expire_at ASC
 		LIMIT $2

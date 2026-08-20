@@ -28,7 +28,9 @@ const vpnColumns = `id, user_id, subscription_id, channel,
 
 // notCampaign 是不分区（user 级）查询的默认谓词：campaign 面对 basic/residential 的既有读写路径
 // 完全不可见（IMPL_PROMPT §2 "basic 分区显式排除 campaign" + 契约 C2）。
-const notCampaign = ` AND COALESCE(product_face, 'basic') <> 'campaign'`
+// ★同时排除改名前旧值 'campaign'：迁移 011 与代码滚动之间若有窗口，未改名的存量行会被
+// 这些 user 级读路径当成 basic 命中（串面）。两值并排后，迁移与部署的先后顺序不再要紧。
+const notCampaign = ` AND COALESCE(product_face, 'basic') NOT IN ('promo', 'campaign')`
 
 func (r *VPNProvisionRepository) Create(ctx context.Context, vp *models.VPNProvision) error {
 	query := `

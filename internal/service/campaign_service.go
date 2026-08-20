@@ -101,7 +101,9 @@ type CampaignProfileView struct {
 
 // isCampaignRequest：plan_tier=campaign（channel 同为 campaign 只是加固判据）。
 func isCampaignRequest(req *models.ProvisionRequest) bool {
-	return req != nil && (req.PlanTier == models.PlanTierCampaign || req.Channel == models.PlanTierCampaign)
+	// 含改名前旧值 "campaign"（滚动上线窗口内 campaign-service 可能仍发旧值）：
+	// 不认旧值 → 请求会落进 legacy 路径的 basic 面，正是本次改名要防的串面。
+	return req != nil && (models.IsCampaignPlanTier(req.PlanTier) || models.IsCampaignPlanTier(req.Channel))
 }
 
 // provisionCampaign 第三产品面开通/叠加（ProvisionVPNUser 对 plan_tier=campaign 的唯一入口；不走
@@ -454,9 +456,18 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 		Status:        status,
 		Channel:       models.PlanTierCampaign,
 		PlanTier:      models.PlanTierCampaign,
-		ServiceTier:   models.ServiceTierStandard, // 契约 C3：一期固定 standard；端上按 plan_tier/profile_class 分键
-		SubscribeURL:  fmt.Sprintf("%s/api/v1/my/vpn/subscribe", s.cfg.Services.PublicBaseURL),
-		DeviceID:      userID,
+		// ★契约 C3（2026-08-20 修订，Q1 方案 B）：service_tier 下发 promo，不再是 standard。
+		// 原因：iOS/macOS 分键实际是 `serviceTier ?? planTier`（service_tier 优先、plan_tier 仅回退），
+		// 下发 standard 会让活动面与 basic 面算出同一个 accountKey/profile 名而互相覆盖——严重方向是
+		// 付费用户的正式 Basic 配置被活动配置顶掉。服务端四层（入口闸/product_face 分区/uuid 复用/
+		// otun 账号唯一键）本已隔离，但覆盖发生在端上落盘，只能靠下发值区分。
+		// 注意：这里改的只是【下发值】；DB 持久化的 service_tier 仍是 standard（节点面确为标准节点），
+		// 分区键是 product_face，不受影响。
+		ServiceTier: models.ProductFaceCampaign,
+		// ★契约 §10-7（2026-08-20，Q7）：活动面不下发 subscribe_url。
+		// 该口不分面、恒返回 basic 配置，端上若拿它刷新活动配置必然刷错；三端已确认刷新路径只认
+		// protocols[]（活动 uuid）。留着是纯陷阱，故不下发。
+		DeviceID: userID,
 		Protocols:     protocols,
 		TrafficLimit:  trafficLimit,
 		TrafficUsed:   trafficUsed,

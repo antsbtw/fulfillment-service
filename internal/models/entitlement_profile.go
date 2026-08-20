@@ -40,7 +40,7 @@ const (
 	EntryKindStripe        = "stripe"
 	EntryKindStripeOnetime = "stripe_onetime"
 	EntryKindCredit        = "credit"
-	EntryKindCampaign      = "campaign"
+	EntryKindCampaign      = "promo"
 	EntryKindGift          = "gift"
 	EntryKindGiftCard      = "gift_card"
 	EntryKindManual        = "manual"

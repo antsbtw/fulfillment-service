@@ -302,7 +302,9 @@ type VPNSubscribeResponse struct {
 	Channel      string        `json:"channel"`
 	PlanTier     string        `json:"plan_tier"`
 	ServiceTier  string        `json:"service_tier"`
-	SubscribeURL string        `json:"subscribe_url"`
+	// omitempty：★契约 Q7——活动面(campaign/promo)不下发本字段（该口不分面、恒返回 basic 配置，
+	// 端上拿它刷活动配置必然刷错）。basic/residential 恒有值，键位与现网逐字节一致（golden 锁定）。
+	SubscribeURL string        `json:"subscribe_url,omitempty"`
 	DeviceID     string        `json:"device_id"`
 	Protocols    []VPNProtocol `json:"protocols,omitempty"`
 	TrafficLimit int64         `json:"traffic_limit"`

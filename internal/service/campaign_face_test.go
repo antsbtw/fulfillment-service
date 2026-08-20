@@ -264,8 +264,14 @@ func TestVPNAll_WithCaps_AppendsCampaignElement(t *testing.T) {
 		t.Fatalf("first two elements drifted from golden.\n--- want ---\n%s\n--- got ---\n%s", want, got)
 	}
 	el := all[2]
-	if el.PlanTier != "campaign" || el.Channel != "campaign" || el.ProfileClass != "campaign" || el.ServiceTier != "standard" {
+	// ★Q1 方案 B：service_tier 必须是 promo（不再是 standard）——端上分键是 serviceTier ?? planTier，
+	// 下发 standard 会与 basic 元素算出同一个键而互相覆盖。
+	// ★Q7：活动面不下发 subscribe_url（该口不分面、恒返回 basic 配置）。
+	if el.PlanTier != "promo" || el.Channel != "promo" || el.ProfileClass != "promo" || el.ServiceTier != "promo" {
 		t.Fatalf("campaign element keys: %+v", el)
+	}
+	if el.SubscribeURL != "" {
+		t.Fatalf("campaign element must NOT carry subscribe_url (Q7), got %q", el.SubscribeURL)
 	}
 	if el.Status != "active" {
 		t.Fatalf("status want active, got %s", el.Status)
@@ -284,10 +290,13 @@ func TestVPNAll_WithCaps_AppendsCampaignElement(t *testing.T) {
 	}
 	// JSON 键名冻结
 	raw, _ := json.Marshal(el)
-	for _, k := range []string{`"profile_class":"campaign"`, `"plan_tier":"campaign"`, `"claims_active":1`, `"granted_days_total":7`, `"granted_traffic_total":`, `"last_claim_at":`, `"stack_limit":{"max_days":56,"max_traffic":214748364800}`, `"status":"active"`} {
+	for _, k := range []string{`"profile_class":"promo"`, `"plan_tier":"promo"`, `"service_tier":"promo"`, `"claims_active":1`, `"granted_days_total":7`, `"granted_traffic_total":`, `"last_claim_at":`, `"stack_limit":{"max_days":56,"max_traffic":214748364800}`, `"status":"active"`} {
 		if !strings.Contains(string(raw), k) {
 			t.Fatalf("missing frozen key %s in %s", k, raw)
 		}
+	}
+	if strings.Contains(string(raw), `"subscribe_url"`) {
+		t.Fatalf("Q7: campaign element must omit subscribe_url entirely, got %s", raw)
 	}
 	// 只有 campaign 的用户（HasActive=false 情形由 subscriptionClient=nil 模拟为 hasActive；这里再验 golden 元素不受 caps 影响）
 }
@@ -302,7 +311,7 @@ func TestVPNAll_WithCaps_ExpiredAndCleaned(t *testing.T) {
 	if err != nil || len(all) != 1 {
 		t.Fatalf("want 1 campaign element, got %d err=%v", len(all), err)
 	}
-	if all[0].Status != "expired" || len(all[0].Protocols) != 0 || all[0].PlanTier != "campaign" {
+	if all[0].Status != "expired" || len(all[0].Protocols) != 0 || all[0].PlanTier != "promo" {
 		t.Fatalf("expired element: %+v", all[0])
 	}
 	// 清理后不下发
@@ -409,11 +418,11 @@ func TestCampaign_ProvisionStackingAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
-	if len(otun.posts) != 1 || otun.posts[0].ProductFace != "campaign" || otun.posts[0].ServiceTier != "standard" || otun.posts[0].AuthUserID != userID {
+	if len(otun.posts) != 1 || otun.posts[0].ProductFace != "promo" || otun.posts[0].ServiceTier != "standard" || otun.posts[0].AuthUserID != userID {
 		t.Fatalf("otun POST: %+v", otun.posts)
 	}
 	camp, _ := store.GetCurrentByUserAndFace(ctx, userID, models.ProductFaceCampaign)
-	if camp == nil || camp.ProductFace != "campaign" || camp.PlanTier != "campaign" || camp.ServiceTier != "standard" || *camp.OtunUUID != r1.VPNUserID || *camp.OtunUUID == "uuid-basic" {
+	if camp == nil || camp.ProductFace != "promo" || camp.PlanTier != "promo" || camp.ServiceTier != "standard" || *camp.OtunUUID != r1.VPNUserID || *camp.OtunUUID == "uuid-basic" {
 		t.Fatalf("campaign row after first claim: %+v", camp)
 	}
 	if camp.TrafficLimit != 10*GB || camp.ExpireAt.Before(t0.AddDate(0, 0, 7).Add(-time.Minute)) {
@@ -487,7 +496,7 @@ func TestCampaign_ProvisionStackingAndRevoke(t *testing.T) {
 	if _, err := s.ProvisionVPNUser(ctx, req("c3", 7, 10)); err != nil {
 		t.Fatalf("reclaim after expiry: %v", err)
 	}
-	if len(otun.posts) != postsBefore+1 || otun.posts[postsBefore].ProductFace != "campaign" || otun.posts[postsBefore].UUID != *camp.OtunUUID {
+	if len(otun.posts) != postsBefore+1 || otun.posts[postsBefore].ProductFace != "promo" || otun.posts[postsBefore].UUID != *camp.OtunUUID {
 		t.Fatalf("fresh period must POST (reset) on same uuid: %+v", otun.posts)
 	}
 	if camp.TrafficLimit != 10*GB || camp.ExpireAt.Before(time.Now().AddDate(0, 0, 7).Add(-time.Minute)) {
@@ -555,7 +564,9 @@ func (f *fakeVPNStoreWithList) ListExpiredCampaignRows(_ context.Context, before
 
 // 7. MapPlanToServiceTier / MapPlanToProductFace / ParseClientCapabilities 纯函数。
 func TestCampaign_Mappings(t *testing.T) {
-	if models.MapPlanToServiceTier("campaign") != "standard" || models.MapPlanToProductFace("campaign") != "campaign" ||
+	if models.MapPlanToServiceTier("promo") != "standard" || models.MapPlanToProductFace("promo") != "promo" ||
+		models.MapPlanToProductFace("campaign") != "promo" || // 改名前旧值仍须映到活动面，否则滚动窗口内串面
+		!models.IsCampaignPlanTier("promo") || !models.IsCampaignPlanTier("campaign") || models.IsCampaignPlanTier("basic") ||
 		models.MapPlanToProductFace("basic") != "basic" || models.MapPlanToProductFace("premium") != "basic" ||
 		models.MapPlanToProductFace("unlimited") != "basic" || models.MapPlanToProductFace("residential") != "residential" {
 		t.Fatal("mapping")
@@ -568,7 +579,7 @@ func TestCampaign_Mappings(t *testing.T) {
 	if models.PartitionFace(false) != "basic" || models.PartitionFace(true) != "residential" {
 		t.Fatal("partition face")
 	}
-	if models.ProductFaceFor("campaign", "standard") != "campaign" || models.ProductFaceFor("basic", "residential") != "residential" || models.ProductFaceFor("premium", "premium") != "basic" {
+	if models.ProductFaceFor("promo", "standard") != "promo" || models.ProductFaceFor("campaign", "standard") != "promo" || models.ProductFaceFor("basic", "residential") != "residential" || models.ProductFaceFor("premium", "premium") != "basic" {
 		t.Fatal("product face for")
 	}
 }
