@@ -72,6 +72,9 @@ type CampaignRevokeRequest struct {
 	SubscriptionID string `json:"subscription_id"` // 可选：给了则按 grant 幂等（同一 grant 只扣一次）
 	Days           int    `json:"days"`
 	TrafficBytes   int64  `json:"traffic_bytes"`
+	// ServiceTier 该权益的线路（standard / residential）。D3 下同一用户 promo 面可有两个
+	// 独立账号，不带线路会扣错账号。空 → standard（存量语义）。
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
 // CampaignRevokeResult 撤销结果。
@@ -116,6 +119,12 @@ func campaignServiceTier(req *models.ProvisionRequest) string {
 		return models.ServiceTierResidential
 	}
 	return models.ServiceTierStandard
+}
+
+// campaignIsResidential 判断这行活动面 provision 是不是住宅线路（迁移 003/036）。
+// 空值兜底 standard——存量活动行（本次改动前建的）都是标准线路。
+func campaignIsResidential(vp *models.VPNProvision) bool {
+	return vp != nil && vp.ServiceTier == models.ServiceTierResidential
 }
 
 // provisionCampaign 第三产品面开通/叠加（ProvisionVPNUser 对 plan_tier=campaign 的唯一入口；不走
@@ -308,7 +317,13 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 // RevokeCampaign 从活动账号扣减 days / traffic（下限 now / 0），同步 otun；只动活动账号。
 // subscription_id 给了则按 grant 幂等（已 revoked / 不存在 → noop 不扣）。
 func (s *VPNService) RevokeCampaign(ctx context.Context, req *CampaignRevokeRequest) (*CampaignRevokeResult, error) {
-	vp, err := s.vpnRepo.GetCurrentByUserAndFace(ctx, req.UserID, models.ProductFaceCampaign)
+	// ★按线路定位（D3）：promo 面下 standard 与 residential 是两个独立账号，
+	// 只按面取会扣到另一条线路那个账号上。
+	revokeTier := models.ServiceTierStandard
+	if req.ServiceTier == models.ServiceTierResidential {
+		revokeTier = models.ServiceTierResidential
+	}
+	vp, err := s.vpnRepo.GetCurrentByUserFaceAndTier(ctx, req.UserID, models.ProductFaceCampaign, revokeTier)
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return nil, fmt.Errorf("lookup campaign provision: %w", err)
 	}
@@ -402,9 +417,20 @@ func (s *VPNService) GetCampaignProfile(ctx context.Context, userID string) (*Ca
 			view.Status = models.VPNProvisionStatusExpired
 		}
 	}
-	// 用量真源 otun（users.traffic_used）；失败退回行值
+	// 用量真源 otun；失败退回行值。
+	// ★按线路取不同的口（迁移 036）：住宅账号在 realm_users，/api/users/:uuid/sync 只查 users 表
+	// 会 404；住宅用量真源是 realm connect-url 下发的 traffic_used（agent 按 uuid 跨出口聚合）。
 	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
-		if sync, serr := s.otunClient.SyncUser(ctx, *vp.OtunUUID); serr == nil && sync != nil {
+		if campaignIsResidential(vp) {
+			if r, rerr := s.otunClient.GetRealmConnectURL(ctx, *vp.OtunUUID); rerr == nil && r != nil {
+				if r.TrafficUsed > 0 {
+					view.TrafficUsed = r.TrafficUsed
+				}
+				if r.TrafficLimit > 0 {
+					view.TrafficLimit = r.TrafficLimit
+				}
+			}
+		} else if sync, serr := s.otunClient.SyncUser(ctx, *vp.OtunUUID); serr == nil && sync != nil {
 			if sync.TrafficUsed > 0 {
 				view.TrafficUsed = sync.TrafficUsed
 			}
@@ -452,8 +478,31 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 	var protocols []models.VPNProtocol
 	var exitCountry string
 	var smart = []byte(nil)
+	var realmNodes []models.RealmNodeSummary
+	var vpnRegions []models.VPNRegion
 	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
-		if sync, serr := s.otunClient.SyncUser(ctx, *vp.OtunUUID); serr == nil && sync != nil {
+		if campaignIsResidential(vp) {
+			// ★住宅线路活动账号（迁移 003/036）：uuid 在 realm_users，必须走 realm connect-url。
+			// 不能用 SyncUser——/api/users/:uuid/sync 只查 users 表，住宅 uuid 在那里查无此行会 404，
+			// 结果是 protocols[] 空：用户领到券却连不上，且不报错。
+			// 协议装配复用正式住宅套餐那套（buildRealmProtocolsN2 / buildRealmNodeSummaries /
+			// buildVPNRegions），故端上解析活动住宅面与解析正式住宅面完全同流程。
+			if r, rerr := s.otunClient.GetRealmConnectURL(ctx, *vp.OtunUUID); rerr == nil && r != nil {
+				protocols = append(protocols, buildRealmProtocolsN2(r.Nodes, r.ConnectURLs, r.ConnectURL)...)
+				realmNodes = buildRealmNodeSummaries(r.Nodes)
+				vpnRegions = buildVPNRegions(r.Regions)
+				if r.TrafficUsed > 0 {
+					trafficUsed = r.TrafficUsed
+				}
+				if r.TrafficLimit > 0 {
+					trafficLimit = r.TrafficLimit
+				}
+				exitCountry = r.ExitCountry
+				smart = r.SmartStrategy
+			} else if rerr != nil {
+				log.Printf("[VPNService] campaign element: realm connect-url failed user=%s uuid=%s: %v", userID, *vp.OtunUUID, rerr)
+			}
+		} else if sync, serr := s.otunClient.SyncUser(ctx, *vp.OtunUUID); serr == nil && sync != nil {
 			for _, p := range sync.Protocols {
 				protocols = append(protocols, models.VPNProtocol{Protocol: p.Protocol, URL: p.URL, Node: p.Node})
 			}
@@ -473,9 +522,9 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 		}
 	}
 	resp := &models.VPNSubscribeResponse{
-		Status:        status,
-		Channel:       models.PlanTierCampaign,
-		PlanTier:      models.PlanTierCampaign,
+		Status:   status,
+		Channel:  models.PlanTierCampaign,
+		PlanTier: models.PlanTierCampaign,
 		// ★契约 C3（2026-08-20 修订，Q1 方案 B）：service_tier 下发 promo，不再是 standard。
 		// 原因：iOS/macOS 分键实际是 `serviceTier ?? planTier`（service_tier 优先、plan_tier 仅回退），
 		// 下发 standard 会让活动面与 basic 面算出同一个 accountKey/profile 名而互相覆盖——严重方向是
@@ -487,7 +536,7 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 		// ★契约 §10-7（2026-08-20，Q7）：活动面不下发 subscribe_url。
 		// 该口不分面、恒返回 basic 配置，端上若拿它刷新活动配置必然刷错；三端已确认刷新路径只认
 		// protocols[]（活动 uuid）。留着是纯陷阱，故不下发。
-		DeviceID: userID,
+		DeviceID:      userID,
 		Protocols:     protocols,
 		TrafficLimit:  trafficLimit,
 		TrafficUsed:   trafficUsed,
@@ -495,6 +544,10 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 		Message:       "Campaign VPN configuration retrieved successfully",
 		ExitCountry:   exitCountry,
 		SmartStrategy: smart,
+		// ★住宅线路活动账号才有值（与正式住宅面同源同格式）；标准线路为 nil → omitempty 不输出，
+		// 与本次改动前逐字节一致（golden 锁定的标准活动元素形态不变）。
+		Nodes:         realmNodes,
+		Regions:       vpnRegions,
 		ConfigVersion: computeConfigVersion(protocols, smart),
 		ProfileClass:  models.ProductFaceCampaign,
 		Campaign:      &models.CampaignInfo{},
