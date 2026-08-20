@@ -30,6 +30,21 @@ func (f *fakeVPNStore) GetCurrentByUserAndFace(_ context.Context, userID, face s
 	return nil, nil
 }
 
+// GetCurrentByUserFaceAndTier 在面内再按线路细分（镜像 SQL 的 COALESCE(service_tier,'standard')）。
+func (f *fakeVPNStore) GetCurrentByUserFaceAndTier(_ context.Context, userID, face, serviceTier string) (*models.VPNProvision, error) {
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		tier := r.ServiceTier
+		if tier == "" {
+			tier = models.ServiceTierStandard
+		}
+		if r.UserID == userID && r.IsCurrent && faceOf(r) == face && tier == serviceTier {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
 func (f *fakeVPNStore) GetOtunUUIDByUserAndFace(_ context.Context, userID, face string) (*string, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {
 		r := f.rows[i]

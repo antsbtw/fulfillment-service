@@ -116,6 +116,25 @@ func (r *VPNProvisionRepository) GetCurrentByUserAndFace(ctx context.Context, us
 	return r.scanOne(r.pool.QueryRow(ctx, query, userID, face))
 }
 
+// GetCurrentByUserFaceAndTier 在某产品面内【再按线路细分】取 current 行。
+//
+// ★为什么活动面需要这一层：迁移 003/036 后 promo 面可同时存在两条线路的账号——
+// standard 落 otun users 表、residential 落 realm_users 表，是两个独立 otun 账号
+// （设计 D3：两个 face 各自独立并存）。若沿用只按 face 取的 GetCurrentByUserAndFace，
+// 用户先领 standard 活动券、再领 residential 活动券时会取到 standard 那行、复用它的
+// otun_uuid，然后把一条 residential 开通请求发到一个只存在于 users 表的 uuid 上——
+// otun 侧按 (auth_user_id, product_face) 在 realm_users 里查无此行，额度会落到错误的账号。
+func (r *VPNProvisionRepository) GetCurrentByUserFaceAndTier(ctx context.Context, userID, face, serviceTier string) (*models.VPNProvision, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM fulfillment.vpn_provisions
+		WHERE user_id = $1 AND is_current = TRUE AND COALESCE(product_face, 'basic') = $2
+		  AND COALESCE(service_tier, 'standard') = $3
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, vpnColumns)
+	return r.scanOne(r.pool.QueryRow(ctx, query, userID, face, serviceTier))
+}
+
 // GetOtunUUIDByUserAndServicePartition 是 GetOtunUUIDByUser 的分区版（MULTI_SERVICE_ENABLED=true 才用）。
 // 只在本次请求所属分区内找 otun_uuid——residential 请求不会取到 standard 记录的 otun_uuid，
 // 从而 residential 走 CreateUser 新建独立 UUID（otun-manager 据此写独立 realm_users 表），

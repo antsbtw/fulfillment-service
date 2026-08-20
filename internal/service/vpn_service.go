@@ -32,6 +32,8 @@ type vpnProvisionStore interface {
 	GetOtunUUIDByUserAndServicePartition(ctx context.Context, userID string, isResidential bool) (*string, error)
 	// ★第三产品面（迁移 010）：按 product_face 分区的读口；*AndServicePartition 在真 repo 里已收口到它们。
 	GetCurrentByUserAndFace(ctx context.Context, userID, face string) (*models.VPNProvision, error)
+	// GetCurrentByUserFaceAndTier 在面内再按线路细分（活动面 promo 可同时有 standard/residential 两账号）。
+	GetCurrentByUserFaceAndTier(ctx context.Context, userID, face, serviceTier string) (*models.VPNProvision, error)
 	GetOtunUUIDByUserAndFace(ctx context.Context, userID, face string) (*string, error)
 	GetBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error)
 	Create(ctx context.Context, vp *models.VPNProvision) error

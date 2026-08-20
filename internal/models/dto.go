@@ -22,6 +22,10 @@ type ProvisionRequest struct {
 	// Resource parameters
 	ResourceType string `json:"resource_type"` // Legacy: hosting_node, otun_node, vpn_user
 	PlanTier     string `json:"plan_tier"`     // basic, standard, premium, unlimited
+	// ServiceTier 仅活动面(promo)使用：该活动权益发哪条线路（standard / residential）。
+	// 由 campaign-service 从领取时的权益快照带来。空 → standard（活动面一期唯一形态，历史语义）。
+	// ★非活动面请求忽略本字段：basic/residential 的线路仍由 MapPlanToServiceTier(plan_tier) 决定。
+	ServiceTier  string `json:"service_tier,omitempty"`
 	Region       string `json:"region"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	ExpireDays   int    `json:"expire_days"`

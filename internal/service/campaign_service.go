@@ -106,8 +106,24 @@ func isCampaignRequest(req *models.ProvisionRequest) bool {
 	return req != nil && (models.IsCampaignPlanTier(req.PlanTier) || models.IsCampaignPlanTier(req.Channel))
 }
 
+// campaignServiceTier 解析活动权益该发哪条线路（设计 D1）。
+//
+// 空值兜底 standard 而非 residential：活动面一期只发标准线路，迁移 003 之前的存量 claim
+// 与仍未升级的 campaign-service 都不会带 service_tier。若兜底成 residential，这些存量
+// 权益会被开成住宅账号——拿到最贵的资源，且与用户原有的活动账号不是同一个。
+func campaignServiceTier(req *models.ProvisionRequest) string {
+	if req != nil && req.ServiceTier == models.ServiceTierResidential {
+		return models.ServiceTierResidential
+	}
+	return models.ServiceTierStandard
+}
+
 // provisionCampaign 第三产品面开通/叠加（ProvisionVPNUser 对 plan_tier=campaign 的唯一入口；不走
 // legacy / entitlement 两条既有路径）。幂等键 = subscription_id（campaign_grants 主键）。
+//
+// ★线路（迁移 003 / 决策 D1）：活动面可发 standard 或 residential。二者 product_face 同为 promo，
+// 但落 otun 的表不同——standard 落 users、residential 落 realm_users（otun-manager 迁移 036），
+// 是各自独立的账号。tier 由 campaign-service 从领取时快照带来，不读批次现值。
 func (s *VPNService) provisionCampaign(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
 	if s.campaignGrants == nil {
 		return nil, ErrCampaignGrantsNotWired
@@ -126,9 +142,9 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 	log.Printf("[VPNService] Provisioning campaign face user=%s sub=%s days=%d traffic=%d",
 		req.UserID, req.SubscriptionID, days, trafficBytes)
 
-	// 0. 幂等：同一 subscription_id 已入账 → 直接返回该 user 的 campaign 行。
+	// 0. 幂等：同一 subscription_id 已入账 → 直接返回该 user 的 campaign 行（同线路那条）。
 	if g, err := s.campaignGrants.GetBySubscriptionID(ctx, req.SubscriptionID); err == nil && g != nil {
-		existing, _ := s.vpnRepo.GetCurrentByUserAndFace(ctx, req.UserID, models.ProductFaceCampaign)
+		existing, _ := s.vpnRepo.GetCurrentByUserFaceAndTier(ctx, req.UserID, models.ProductFaceCampaign, campaignServiceTier(req))
 		if existing != nil && existing.OtunUUID != nil {
 			return &models.ProvisionResponse{
 				ResourceID: existing.ID, Status: models.StatusActive, VPNUserID: *existing.OtunUUID,
@@ -140,7 +156,11 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 	}
 
 	now := time.Now()
-	existing, _ := s.vpnRepo.GetCurrentByUserAndFace(ctx, req.UserID, models.ProductFaceCampaign)
+	// 本次权益的线路（快照值），下面开 otun 账号与落投影行都用它。
+	tier := campaignServiceTier(req)
+	// ★按【面 + 线路】取，不能只按面（D3）：promo 面可同时有 standard 与 residential 两个
+	// 独立账号，只按面取会拿到另一条线路那行、复用它的 otun_uuid，把开通打到错误的 otun 表。
+	existing, _ := s.vpnRepo.GetCurrentByUserFaceAndTier(ctx, req.UserID, models.ProductFaceCampaign, tier)
 
 	var (
 		vp          *models.VPNProvision
@@ -171,7 +191,7 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 				SSPassword:   generateRandomPassword(16),
 				TrafficLimit: limitBytes,
 				ExpireAt:     expireAt.Format(time.RFC3339),
-				ServiceTier:  models.ServiceTierStandard,
+				ServiceTier:  tier,
 				ProductFace:  models.ProductFaceCampaign,
 			}); err != nil {
 				return nil, fmt.Errorf("failed to reset campaign VPN user in otun-manager: %w", err)
@@ -192,7 +212,7 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 		existing.SubscriptionID = req.SubscriptionID
 		existing.Channel = models.PlanTierCampaign
 		existing.PlanTier = models.PlanTierCampaign
-		existing.ServiceTier = models.ServiceTierStandard
+		existing.ServiceTier = tier
 		existing.ProductFace = models.ProductFaceCampaign
 		existing.Status = models.VPNProvisionStatusActive
 		existing.IsCurrent = true
@@ -218,7 +238,7 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 			SSPassword:   generateRandomPassword(16),
 			TrafficLimit: limitBytes,
 			ExpireAt:     expireAt.Format(time.RFC3339),
-			ServiceTier:  models.ServiceTierStandard,
+			ServiceTier:  tier,
 			ProductFace:  models.ProductFaceCampaign,
 		})
 		if err != nil {
@@ -241,7 +261,7 @@ func (s *VPNService) provisionCampaign(ctx context.Context, req *models.Provisio
 			SubscriptionID: req.SubscriptionID,
 			Channel:        models.PlanTierCampaign,
 			BusinessType:   models.BusinessTypeGift,
-			ServiceTier:    models.ServiceTierStandard,
+			ServiceTier:    tier,
 			ProductFace:    models.ProductFaceCampaign,
 			OtunUUID:       &otunUUID,
 			PlanTier:       models.PlanTierCampaign,
@@ -461,8 +481,8 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 		// 下发 standard 会让活动面与 basic 面算出同一个 accountKey/profile 名而互相覆盖——严重方向是
 		// 付费用户的正式 Basic 配置被活动配置顶掉。服务端四层（入口闸/product_face 分区/uuid 复用/
 		// otun 账号唯一键）本已隔离，但覆盖发生在端上落盘，只能靠下发值区分。
-		// 注意：这里改的只是【下发值】；DB 持久化的 service_tier 仍是 standard（节点面确为标准节点），
-		// 分区键是 product_face，不受影响。
+		// 注意：这里改的只是【下发值】；DB 持久化的 service_tier 是该权益的真实线路
+		// （standard 或 residential，见迁移 003/036），分区键是 product_face，均不受影响。
 		ServiceTier: models.ProductFaceCampaign,
 		// ★契约 §10-7（2026-08-20，Q7）：活动面不下发 subscribe_url。
 		// 该口不分面、恒返回 basic 配置，端上若拿它刷新活动配置必然刷错；三端已确认刷新路径只认
