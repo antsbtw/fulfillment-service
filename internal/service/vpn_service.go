@@ -1361,23 +1361,82 @@ func (s *VPNService) UpdateUserEmail(ctx context.Context, userID, email string) 
 // 对应前端 no_assignment（404）。
 var ErrNoRealmAssignment = errors.New("no_assignment")
 
-// resolveResidentialOtunUUID 解析【住宅面】的 otun_uuid。realm/region 能力只对 residential
-// 有意义（标准面没有 realm 分配），因此这里【无条件】按住宅分区取 uuid，而不是用
-// GetOtunUUIDByUser（取 created_at 最新的任意面）。
+// RealmFace 指明 realm/region 系列接口要操作【哪一个产品面】的 realm 账号。
 //
-// 修复 no_assignment 误报：持双面的用户若标准面 provision 后建（如先订 residential 再买
-// basic/积分），GetOtunUUIDByUser 会取到标准 uuid → manager egresses 能列全局候选（200），
-// 但 select 在 realm_user_assignment 找不到该标准 uuid → no_assignment（404），表现为
-// "list 成功但 select 失败" 的自相矛盾。强制住宅分区即可锁定真正有 assignment 的住宅 uuid。
-func (s *VPNService) resolveResidentialOtunUUID(ctx context.Context, userID string) (*string, error) {
-	return s.vpnRepo.GetOtunUUIDByUserAndServicePartition(ctx, userID, true)
+// ★2026-08-21 P2 修复：此前 realm 六口无条件取 product_face='residential'，
+// 活动·住宅面（promo × residential）上线后，两个 realm 面并存，
+// 从活动面发起的任何区域操作都会落到【付费住宅账号】上——
+// 用户在活动面点"切 US"会切走他花钱买的订阅出口，活动面纹丝不动（红线 R1），
+// 且切换计数记在付费面那条 assignment 上，消耗付费用户的 24h 额度（红线 R2）。
+//
+// 形态采用契约 v0.6 的分键（plan_tier × service_tier 二元组），不引入新枚举。
+// ★缺省语义 = 付费住宅面：PlanTier/ServiceTier 均空时行为与修复前【逐字节一致】，
+// 保证老客户端与所有付费面调用方零改动（红线 R5）。
+type RealmFace struct {
+	PlanTier    string // "residential"（付费住宅，缺省）/ "promo"（活动面）
+	ServiceTier string // "residential" / "standard"
+}
+
+// ResidentialFace 是缺省面（付费住宅），供调用方显式表达"就是原来那个面"。
+func ResidentialFace() RealmFace {
+	return RealmFace{PlanTier: models.ProductFaceResidential, ServiceTier: models.ServiceTierResidential}
+}
+
+// normalize 把空值补齐成付费住宅面（向后兼容）。
+func (f RealmFace) normalize() RealmFace {
+	if f.PlanTier == "" {
+		f.PlanTier = models.ProductFaceResidential
+	}
+	if f.ServiceTier == "" {
+		f.ServiceTier = models.ServiceTierResidential
+	}
+	return f
+}
+
+// isCampaign 该面是否活动面。
+func (f RealmFace) isCampaign() bool {
+	return f.normalize().PlanTier == models.PlanTierCampaign
+}
+
+// resolveRealmOtunUUID 按【产品面二元组】解析该面的 otun_uuid。
+//
+// realm/region 能力只对 residential 线路有意义（标准线路没有 realm 分配），
+// 故非住宅线路直接返回 ErrNoRealmAssignment，避免把标准面 uuid 送进 realm 接口。
+//
+// 历史注记（缺省面沿用至今的理由）：持双面的用户若标准面 provision 后建
+//（如先订 residential 再买 basic/积分），按"取最新任意面"会拿到标准 uuid →
+// manager egresses 能列全局候选（200），但 select 在 realm_user_assignment
+// 找不到该标准 uuid → no_assignment（404），表现为"list 成功但 select 失败"的自相矛盾。
+// 按面锁定即可拿到真正有 assignment 的那个 uuid。
+func (s *VPNService) resolveRealmOtunUUID(ctx context.Context, userID string, face RealmFace) (*string, error) {
+	f := face.normalize()
+	// 非住宅线路无 realm 分配（活动·标准 / 基础套餐都走标准节点）。
+	if f.ServiceTier != models.ServiceTierResidential {
+		return nil, ErrNoRealmAssignment
+	}
+	if !f.isCampaign() {
+		// 付费住宅面：沿用原分区读口，行为与修复前逐字节一致。
+		return s.vpnRepo.GetOtunUUIDByUserAndServicePartition(ctx, userID, true)
+	}
+	// 活动面：在 promo 面内再按线路细分（promo 面可同时有 standard/residential 两个账号）。
+	vp, err := s.vpnRepo.GetCurrentByUserFaceAndTier(ctx, userID, models.ProductFaceCampaign, models.ServiceTierResidential)
+	if err != nil {
+		return nil, fmt.Errorf("get campaign residential provision: %w", err)
+	}
+	if vp == nil || vp.OtunUUID == nil || *vp.OtunUUID == "" {
+		return nil, ErrNoRealmAssignment
+	}
+	return vp.OtunUUID, nil
 }
 
 // ListRealmEgresses 列出用户可选出口（BFF GET /resources/vpn/regions 的下游）。
 // 未开通 residential（无住宅面 otun_uuid）的用户视为无分配：ErrNoRealmAssignment 让 BFF 据此判定。
-func (s *VPNService) ListRealmEgresses(ctx context.Context, userID string) (*client.RealmEgressListResponse, error) {
-	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+func (s *VPNService) ListRealmEgresses(ctx context.Context, userID string, face RealmFace) (*client.RealmEgressListResponse, error) {
+	otunUUID, err := s.resolveRealmOtunUUID(ctx, userID, face)
 	if err != nil {
+		if errors.Is(err, ErrNoRealmAssignment) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
 	if otunUUID == nil || *otunUUID == "" {
@@ -1388,9 +1447,12 @@ func (s *VPNService) ListRealmEgresses(ctx context.Context, userID string) (*cli
 
 // SelectRealmEgress 切换用户当前出口（BFF POST /resources/vpn/region 的下游）。
 // 业务级失败以 *client.RealmAPIError 返回，handler 据此透传状态码。
-func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID string) (*client.RealmSelectResponse, error) {
-	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID string, face RealmFace) (*client.RealmSelectResponse, error) {
+	otunUUID, err := s.resolveRealmOtunUUID(ctx, userID, face)
 	if err != nil {
+		if errors.Is(err, ErrNoRealmAssignment) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
 	if otunUUID == nil || *otunUUID == "" {
@@ -1400,9 +1462,12 @@ func (s *VPNService) SelectRealmEgress(ctx context.Context, userID, egressID str
 }
 
 // ListRealmCountries 按国家聚合 online 出口（BFF GET /resources/vpn/countries 的下游，§2c/§7.2）。
-func (s *VPNService) ListRealmCountries(ctx context.Context, userID string) (*client.RealmCountriesResponse, error) {
-	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+func (s *VPNService) ListRealmCountries(ctx context.Context, userID string, face RealmFace) (*client.RealmCountriesResponse, error) {
+	otunUUID, err := s.resolveRealmOtunUUID(ctx, userID, face)
 	if err != nil {
+		if errors.Is(err, ErrNoRealmAssignment) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
 	if otunUUID == nil || *otunUUID == "" {
@@ -1433,9 +1498,12 @@ func regionizeRealmResponse(resp *client.RealmConnectURLResponse) *RealmResponse
 
 // SelectRealmCountry 切目的国（BFF POST /resources/vpn/select-country 的下游，§2c/§7.2）。
 // 业务级失败(403/409/429)以 *client.RealmAPIError 返回，handler 据此透传状态码。
-func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country string) (*RealmResponseWithRegions, error) {
-	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country string, face RealmFace) (*RealmResponseWithRegions, error) {
+	otunUUID, err := s.resolveRealmOtunUUID(ctx, userID, face)
 	if err != nil {
+		if errors.Is(err, ErrNoRealmAssignment) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
 	if otunUUID == nil || *otunUUID == "" {
@@ -1450,9 +1518,12 @@ func (s *VPNService) SelectRealmCountry(ctx context.Context, userID, country str
 
 // GetRealmSwitchReady 查目标出口是否已确认应用该用户（BFF GET /resources/vpn/region/status 的下游，
 // 切换确认握手 P4）。egressID 可空（manager 缺省取当前 assignment 出口）。
-func (s *VPNService) GetRealmSwitchReady(ctx context.Context, userID, egressID string) (*client.RealmReadyResponse, error) {
-	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+func (s *VPNService) GetRealmSwitchReady(ctx context.Context, userID, egressID string, face RealmFace) (*client.RealmReadyResponse, error) {
+	otunUUID, err := s.resolveRealmOtunUUID(ctx, userID, face)
 	if err != nil {
+		if errors.Is(err, ErrNoRealmAssignment) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
 	if otunUUID == nil || *otunUUID == "" {
@@ -1471,9 +1542,12 @@ func (s *VPNService) GetRealmSwitchReady(ctx context.Context, userID, egressID s
 // GetRealmConnectURLForUser 取用户当前出口连接 URL（BFF 可选 GET /resources/vpn/connect-url 的下游）。
 // 无住宅面 otun_uuid 或无分配（manager 404）→ ErrNoRealmAssignment。
 // regions[] 归一化口径与 select-country 一致（RealmResponseWithRegions）。
-func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string) (*RealmResponseWithRegions, error) {
-	otunUUID, err := s.resolveResidentialOtunUUID(ctx, userID)
+func (s *VPNService) GetRealmConnectURLForUser(ctx context.Context, userID string, face RealmFace) (*RealmResponseWithRegions, error) {
+	otunUUID, err := s.resolveRealmOtunUUID(ctx, userID, face)
 	if err != nil {
+		if errors.Is(err, ErrNoRealmAssignment) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve otun uuid: %w", err)
 	}
 	if otunUUID == nil || *otunUUID == "" {

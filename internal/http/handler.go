@@ -527,7 +527,7 @@ func (h *Handler) GetUserRealmRegions(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.vpnService.ListRealmEgresses(c.Request.Context(), userID)
+	resp, err := h.vpnService.ListRealmEgresses(c.Request.Context(), userID, realmFaceFromQuery(c))
 	if err != nil {
 		// 未订阅 residential / 未开通 → no_assignment（404），前端据此隐藏入口（a+b 兜底）。
 		if errors.Is(err, service.ErrNoRealmAssignment) {
@@ -554,7 +554,7 @@ func (h *Handler) GetUserRealmRegionStatus(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.vpnService.GetRealmSwitchReady(c.Request.Context(), userID, c.Query("egress_id"))
+	resp, err := h.vpnService.GetRealmSwitchReady(c.Request.Context(), userID, c.Query("egress_id"), realmFaceFromQuery(c))
 	if err != nil {
 		if errors.Is(err, service.ErrNoRealmAssignment) {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -572,6 +572,29 @@ func (h *Handler) GetUserRealmRegionStatus(c *gin.Context) {
 
 // SelectUserRealmRegion 切换用户当前出口（internal，对应 BFF POST /resources/vpn/region）。
 // 请求体 {"egress_id":"..."}；user_id 来自路径（BFF 从 JWT 注入）。
+// realmFaceFromQuery 从 query 解析 realm 系列接口的【产品面】入参（契约 v0.6 分键二元组）。
+//
+// ★2026-08-21 P2：缺省（两参数都不传）= 付费住宅面，行为与修复前逐字节一致，
+// 老客户端与所有付费面调用方零改动。活动面须显式传 plan_tier=promo&service_tier=residential。
+// realmFaceFromBody 取 body 里的面参数，任一为空则回落到 query（两种传法都支持）。
+func realmFaceFromBody(c *gin.Context, planTier, serviceTier string) service.RealmFace {
+	f := realmFaceFromQuery(c)
+	if planTier != "" {
+		f.PlanTier = planTier
+	}
+	if serviceTier != "" {
+		f.ServiceTier = serviceTier
+	}
+	return f
+}
+
+func realmFaceFromQuery(c *gin.Context) service.RealmFace {
+	return service.RealmFace{
+		PlanTier:    c.Query("plan_tier"),
+		ServiceTier: c.Query("service_tier"),
+	}
+}
+
 func (h *Handler) SelectUserRealmRegion(c *gin.Context) {
 	userID := c.Param("user_id")
 	if userID == "" {
@@ -581,13 +604,16 @@ func (h *Handler) SelectUserRealmRegion(c *gin.Context) {
 
 	var req struct {
 		EgressID string `json:"egress_id" binding:"required"`
+		// ★P2：产品面二元组（可选，缺省=付费住宅面）。也可用 query 传，body 优先。
+		PlanTier    string `json:"plan_tier"`
+		ServiceTier string `json:"service_tier"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "egress_id required"})
 		return
 	}
 
-	resp, err := h.vpnService.SelectRealmEgress(c.Request.Context(), userID, req.EgressID)
+	resp, err := h.vpnService.SelectRealmEgress(c.Request.Context(), userID, req.EgressID, realmFaceFromBody(c, req.PlanTier, req.ServiceTier))
 	if err != nil {
 		// 业务级失败：原样透传 manager 的状态码 + error 字符串（switch_rate_limited / egress_offline /
 		// egress_not_found）+ retry_after_sec，供前端按状态码分流与倒计时（§Q7）。
@@ -622,7 +648,7 @@ func (h *Handler) GetUserRealmCountries(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "user_id required"})
 		return
 	}
-	resp, err := h.vpnService.ListRealmCountries(c.Request.Context(), userID)
+	resp, err := h.vpnService.ListRealmCountries(c.Request.Context(), userID, realmFaceFromQuery(c))
 	if err != nil {
 		if errors.Is(err, service.ErrNoRealmAssignment) {
 			// 未开通 residential → 空国家列表（前端隐藏选国入口）。
@@ -645,12 +671,15 @@ func (h *Handler) SelectUserRealmCountry(c *gin.Context) {
 	}
 	var req struct {
 		Country string `json:"country" binding:"required"`
+		// ★P2：产品面二元组（可选，缺省=付费住宅面）。也可用 query 传，body 优先。
+		PlanTier    string `json:"plan_tier"`
+		ServiceTier string `json:"service_tier"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "country required"})
 		return
 	}
-	resp, err := h.vpnService.SelectRealmCountry(c.Request.Context(), userID, req.Country)
+	resp, err := h.vpnService.SelectRealmCountry(c.Request.Context(), userID, req.Country, realmFaceFromBody(c, req.PlanTier, req.ServiceTier))
 	if err != nil {
 		// 业务级失败：透传 manager 状态码 + error（not_residential 403 / no_online_egress_in_country 409 /
 		// switch_rate_limited 429）+ retry_after_sec（§Q7）。
@@ -681,7 +710,7 @@ func (h *Handler) GetUserRealmConnectURL(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.vpnService.GetRealmConnectURLForUser(c.Request.Context(), userID)
+	resp, err := h.vpnService.GetRealmConnectURLForUser(c.Request.Context(), userID, realmFaceFromQuery(c))
 	if err != nil {
 		if errors.Is(err, service.ErrNoRealmAssignment) {
 			c.JSON(http.StatusNotFound, gin.H{

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/models"
@@ -103,7 +104,8 @@ func TestResolveResidentialOtunUUID_PrefersResidentialOverNewerStandard(t *testi
 	store := &fakeVPNStore{rows: []*models.VPNProvision{res, std}}
 	s := newSvc(true, store)
 
-	got, err := s.resolveResidentialOtunUUID(context.Background(), userID)
+	// ★P2 后：缺省面（不传二元组）必须仍解析到【付费住宅】uuid——这条锁住"付费面零改动"。
+	got, err := s.resolveRealmOtunUUID(context.Background(), userID, RealmFace{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -112,8 +114,9 @@ func TestResolveResidentialOtunUUID_PrefersResidentialOverNewerStandard(t *testi
 	}
 }
 
-// TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential：只持标准面 → 住宅分区
-// 解析为 nil（上层据此返回 ErrNoRealmAssignment），不会误取标准 uuid。
+// TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential：只持标准面 → 不会误取标准 uuid。
+// ★P2 后语义微调：新解析器对"无住宅面"直接返回 ErrNoRealmAssignment（而非 nil,nil），
+// 上层两种都映射成 404 no_assignment，对外行为不变。
 func TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential(t *testing.T) {
 	const userID = "u-std-only"
 	store := &fakeVPNStore{rows: []*models.VPNProvision{
@@ -122,11 +125,11 @@ func TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential(t *testing.T) {
 	}}
 	s := newSvc(true, store)
 
-	got, err := s.resolveResidentialOtunUUID(context.Background(), userID)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	got, err := s.resolveRealmOtunUUID(context.Background(), userID, RealmFace{})
 	if got != nil {
-		t.Fatalf("want nil (no residential face), got %v", *got)
+		t.Fatalf("want no residential face, got %v", *got)
+	}
+	if err != nil && !errors.Is(err, ErrNoRealmAssignment) {
+		t.Fatalf("want nil or ErrNoRealmAssignment, got %v", err)
 	}
 }
