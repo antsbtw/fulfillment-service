@@ -34,6 +34,8 @@ type vpnProvisionStore interface {
 	GetCurrentByUserAndFace(ctx context.Context, userID, face string) (*models.VPNProvision, error)
 	// GetCurrentByUserFaceAndTier 在面内再按线路细分（活动面 promo 可同时有 standard/residential 两账号）。
 	GetCurrentByUserFaceAndTier(ctx context.Context, userID, face, serviceTier string) (*models.VPNProvision, error)
+	// ListCurrentByUserAndFace 取该面【全部】current 行（活动面每条线路一行）。
+	ListCurrentByUserAndFace(ctx context.Context, userID, face string) ([]*models.VPNProvision, error)
 	GetOtunUUIDByUserAndFace(ctx context.Context, userID, face string) (*string, error)
 	GetBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error)
 	Create(ctx context.Context, vp *models.VPNProvision) error
@@ -1261,7 +1263,8 @@ func (s *VPNService) GetUserVPNSubscribeConfigAll(ctx context.Context, userID st
 // GetUserVPNSubscribeConfigAllWithCaps 带客户端能力集的 /vpn/all（契约 C1 门控）：
 //   - caps 不含 campaign-profile（老客户端 / nil）：与 GetUserVPNSubscribeConfigAll 逐字节一致（golden 锁定），
 //     即便该用户持有活动账号也绝不出现 campaign 元素；
-//   - caps 含 campaign-profile：在 basic/residential 两面之后追加 campaign 元素（buildCampaignElement），
+//   - caps 含 campaign-profile：在 basic/residential 两面之后追加 campaign 元素（buildCampaignElements，
+//     promo 面每条线路一个），
 //     且【不受】"是否有 active 订阅"门的约束——活动账号对订阅语义不可见（subscription-service GetActiveByUser
 //     排除 campaign），只领过活动的用户 HasActive=false 也要能拿到 campaign 元素。
 func (s *VPNService) GetUserVPNSubscribeConfigAllWithCaps(ctx context.Context, userID string, caps ClientCapabilities) ([]*models.VPNSubscribeResponse, error) {
@@ -1297,9 +1300,9 @@ func (s *VPNService) GetUserVPNSubscribeConfigAllWithCaps(ctx context.Context, u
 	}
 	// ★门控：只有声明能力的客户端才追加 campaign 元素（C1）；无活动账号/已清理 → 不追加（C5）。
 	if caps.Has(CapabilityCampaignProfile) {
-		if el := s.buildCampaignElement(ctx, userID); el != nil {
-			out = append(out, el)
-		}
+		// ★矩阵（v0.6）：promo 面每条线路一个元素——用户可同时持有标准活动券与住宅活动券。
+		// 只追加一个会让后领的那张券在端上"看不见"。
+		out = append(out, s.buildCampaignElements(ctx, userID)...)
 	}
 	return out, nil
 }

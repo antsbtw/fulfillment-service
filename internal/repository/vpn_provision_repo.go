@@ -116,6 +116,35 @@ func (r *VPNProvisionRepository) GetCurrentByUserAndFace(ctx context.Context, us
 	return r.scanOne(r.pool.QueryRow(ctx, query, userID, face))
 }
 
+// ListCurrentByUserAndFace 取某产品面下【全部】current 行（每条线路一行）。
+//
+// ★活动面(promo)自 D3 起可同时有 standard 与 residential 两个独立账号，
+// GetCurrentByUserAndFace 只 LIMIT 1 会漏掉另一条线路——/vpn/all 少下发一个元素，
+// 用户看不到刚领的那张券。排序固定（service_tier 升序 → residential 在前）避免端上
+// 因顺序抖动误判"配置变了"。
+func (r *VPNProvisionRepository) ListCurrentByUserAndFace(ctx context.Context, userID, face string) ([]*models.VPNProvision, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM fulfillment.vpn_provisions
+		WHERE user_id = $1 AND is_current = TRUE AND COALESCE(product_face, 'basic') = $2
+		ORDER BY COALESCE(service_tier, 'standard') ASC, created_at DESC
+	`, vpnColumns)
+	rows, err := r.pool.Query(ctx, query, userID, face)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*models.VPNProvision, 0, 2)
+	for rows.Next() {
+		vp, serr := r.scanOne(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		out = append(out, vp)
+	}
+	return out, rows.Err()
+}
+
 // GetCurrentByUserFaceAndTier 在某产品面内【再按线路细分】取 current 行。
 //
 // ★为什么活动面需要这一层：迁移 003/036 后 promo 面可同时存在两条线路的账号——

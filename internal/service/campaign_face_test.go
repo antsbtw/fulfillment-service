@@ -264,10 +264,13 @@ func TestVPNAll_WithCaps_AppendsCampaignElement(t *testing.T) {
 		t.Fatalf("first two elements drifted from golden.\n--- want ---\n%s\n--- got ---\n%s", want, got)
 	}
 	el := all[2]
-	// ★Q1 方案 B：service_tier 必须是 promo（不再是 standard）——端上分键是 serviceTier ?? planTier，
-	// 下发 standard 会与 basic 元素算出同一个键而互相覆盖。
+	// ★契约 v0.6 矩阵：plan_tier/channel/profile_class 标"活动产品面"，service_tier 如实标线路。
+	// 本 fixture 是标准线路活动账号 → service_tier=standard。
+	// 端上分键为二元组 (plan_tier, service_tier)：promo+standard 与 basic+standard 天然分开
+	// （v0.5 曾把 service_tier 压平成 promo 来迁就端上单键，活动面支持住宅线路后已走不通）。
 	// ★Q7：活动面不下发 subscribe_url（该口不分面、恒返回 basic 配置）。
-	if el.PlanTier != "promo" || el.Channel != "promo" || el.ProfileClass != "promo" || el.ServiceTier != "promo" {
+	if el.PlanTier != "promo" || el.Channel != "promo" || el.ProfileClass != "promo" ||
+		el.ServiceTier != models.ServiceTierStandard {
 		t.Fatalf("campaign element keys: %+v", el)
 	}
 	if el.SubscribeURL != "" {
@@ -288,9 +291,9 @@ func TestVPNAll_WithCaps_AppendsCampaignElement(t *testing.T) {
 	if el.ConfigVersion == "" || el.ActiveClass != "" || len(el.Profiles) != 0 {
 		t.Fatalf("campaign element must have config_version and no profiles[]/active_class: %+v", el)
 	}
-	// JSON 键名冻结
+	// JSON 键名冻结（v0.6：service_tier 冻的是"如实下发线路"，本 fixture 为标准线路活动账号）
 	raw, _ := json.Marshal(el)
-	for _, k := range []string{`"profile_class":"promo"`, `"plan_tier":"promo"`, `"service_tier":"promo"`, `"claims_active":1`, `"granted_days_total":7`, `"granted_traffic_total":`, `"last_claim_at":`, `"stack_limit":{"max_days":56,"max_traffic":214748364800}`, `"status":"active"`} {
+	for _, k := range []string{`"profile_class":"promo"`, `"plan_tier":"promo"`, `"service_tier":"standard"`, `"claims_active":1`, `"granted_days_total":7`, `"granted_traffic_total":`, `"last_claim_at":`, `"stack_limit":{"max_days":56,"max_traffic":214748364800}`, `"status":"active"`} {
 		if !strings.Contains(string(raw), k) {
 			t.Fatalf("missing frozen key %s in %s", k, raw)
 		}

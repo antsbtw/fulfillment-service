@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/config"
@@ -16,7 +17,7 @@ type fakeVPNStore struct {
 }
 
 // faceOf 模拟迁移 010 的分区键：优先行上的 ProductFace，空则按 (plan_tier, service_tier) 推导
-//（与回填口径一致）。老测试构造的行没填 ProductFace，仍按 service_tier 落到 basic/residential。
+// （与回填口径一致）。老测试构造的行没填 ProductFace，仍按 service_tier 落到 basic/residential。
 func faceOf(r *models.VPNProvision) string { return r.EffectiveProductFace() }
 
 // GetCurrentByUserAndFace / GetOtunUUIDByUserAndFace / GetBySubscriptionIDAndFace：按产品面分区。
@@ -28,6 +29,27 @@ func (f *fakeVPNStore) GetCurrentByUserAndFace(_ context.Context, userID, face s
 		}
 	}
 	return nil, nil
+}
+
+// ListCurrentByUserAndFace 取该面全部 current 行（镜像 SQL 的排序：service_tier 升序）。
+func (f *fakeVPNStore) ListCurrentByUserAndFace(_ context.Context, userID, face string) ([]*models.VPNProvision, error) {
+	out := []*models.VPNProvision{}
+	for _, r := range f.rows {
+		if r.UserID == userID && r.IsCurrent && faceOf(r) == face {
+			out = append(out, r)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, tj := out[i].ServiceTier, out[j].ServiceTier
+		if ti == "" {
+			ti = models.ServiceTierStandard
+		}
+		if tj == "" {
+			tj = models.ServiceTierStandard
+		}
+		return ti < tj
+	})
+	return out, nil
 }
 
 // GetCurrentByUserFaceAndTier 在面内再按线路细分（镜像 SQL 的 COALESCE(service_tier,'standard')）。
@@ -133,9 +155,9 @@ func (f *fakeVPNStore) Create(_ context.Context, vp *models.VPNProvision) error 
 	f.rows = append(f.rows, vp)
 	return nil
 }
-func (f *fakeVPNStore) Update(_ context.Context, _ *models.VPNProvision) error          { return nil }
-func (f *fakeVPNStore) MarkNotCurrent(_ context.Context, _ string) error                { return nil }
-func (f *fakeVPNStore) UpdateEmailByUserID(_ context.Context, _, _ string) error        { return nil }
+func (f *fakeVPNStore) Update(_ context.Context, _ *models.VPNProvision) error   { return nil }
+func (f *fakeVPNStore) MarkNotCurrent(_ context.Context, _ string) error         { return nil }
+func (f *fakeVPNStore) UpdateEmailByUserID(_ context.Context, _, _ string) error { return nil }
 
 func ptrStr(s string) *string { return &s }
 

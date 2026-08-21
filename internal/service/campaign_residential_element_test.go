@@ -23,10 +23,11 @@ func TestCampaignElement_ResidentialUsesRealmConnectURL(t *testing.T) {
 	store := &fakeVPNStore{rows: []*models.VPNProvision{row}}
 	s, _ := newCampaignSvc(t, store, newFakeGrantStore())
 
-	el := s.buildCampaignElement(context.Background(), "u-resi-el")
-	if el == nil {
-		t.Fatal("campaign element must be present for an active residential promo account")
+	els := s.buildCampaignElements(context.Background(), "u-resi-el")
+	if len(els) != 1 {
+		t.Fatalf("want exactly 1 campaign element; got %d", len(els))
 	}
+	el := els[0]
 
 	// ★核心：必须拿到 realm 协议，不能是空列表
 	if len(el.Protocols) == 0 {
@@ -53,12 +54,12 @@ func TestCampaignElement_ResidentialUsesRealmConnectURL(t *testing.T) {
 		t.Errorf("residential traffic_used should come from realm truth; got %d", el.TrafficUsed)
 	}
 
-	// ★契约 C3 不受线路影响：三个分键仍恒为 promo，否则端上会与 basic 面撞 accountKey 互相覆盖
-	if el.ServiceTier != models.ProductFaceCampaign ||
-		el.PlanTier != models.PlanTierCampaign ||
-		el.ProfileClass != models.ProductFaceCampaign {
-		t.Fatalf("★契约 C3 破坏：活动面三分键必须恒为 promo；got service_tier=%q plan_tier=%q profile_class=%q",
-			el.ServiceTier, el.PlanTier, el.ProfileClass)
+	// ★契约 v0.6 矩阵：plan_tier 说产品面、service_tier 说线路，二者构成分键二元组。
+	if el.PlanTier != models.PlanTierCampaign || el.ProfileClass != models.ProductFaceCampaign {
+		t.Fatalf("产品面标识必须是 promo；got plan_tier=%q profile_class=%q", el.PlanTier, el.ProfileClass)
+	}
+	if el.ServiceTier != models.ServiceTierResidential {
+		t.Fatalf("★矩阵破坏：住宅活动元素 service_tier 必须如实下发 residential；got %q", el.ServiceTier)
 	}
 	// 活动面不下发 subscribe_url（契约 Q7），线路变化不得引入它
 	if el.SubscribeURL != "" {
@@ -74,12 +75,16 @@ func TestCampaignElement_StandardUnchanged(t *testing.T) {
 	store := &fakeVPNStore{rows: []*models.VPNProvision{row}}
 	s, _ := newCampaignSvc(t, store, newFakeGrantStore())
 
-	el := s.buildCampaignElement(context.Background(), "u-std-el")
-	if el == nil {
-		t.Fatal("campaign element must be present")
+	els := s.buildCampaignElements(context.Background(), "u-std-el")
+	if len(els) != 1 {
+		t.Fatalf("want exactly 1 campaign element; got %d", len(els))
 	}
+	el := els[0]
 	if len(el.Nodes) != 0 || len(el.Regions) != 0 {
 		t.Fatalf("标准线路活动元素不得出现住宅专属字段；nodes=%d regions=%d", len(el.Nodes), len(el.Regions))
+	}
+	if el.ServiceTier != models.ServiceTierStandard {
+		t.Fatalf("标准活动元素 service_tier 必须是 standard；got %q", el.ServiceTier)
 	}
 	for _, p := range el.Protocols {
 		if strings.Contains(p.URL, "-realm://") {

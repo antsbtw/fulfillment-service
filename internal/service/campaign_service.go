@@ -460,9 +460,26 @@ func (s *VPNService) GetCampaignProfile(ctx context.Context, userID string) (*Ca
 // buildCampaignElement 构造 /vpn/all 的 campaign 元素（契约 §3）。无活动账号 / 已清理 → nil（C5）。
 // 到期但仍在保留期（行仍 is_current）→ status="expired"。protocols 取 otun GET /api/users/:uuid/sync
 // （按 uuid，天然是活动账号自己的凭证，H2）；取不到（账号 disabled / 抖动）→ protocols 空、不失败。
-func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *models.VPNSubscribeResponse {
-	vp, err := s.vpnRepo.GetCurrentByUserAndFace(ctx, userID, models.ProductFaceCampaign)
-	if err != nil || vp == nil {
+// buildCampaignElements 构造该用户【全部】活动面元素——promo 面每条线路一个（矩阵 D3）。
+// 顺序稳定：residential 在前、standard 在后（与 ListCampaignFaces 的 ORDER BY 一致），
+// 避免端上因顺序抖动而误判"配置变了"。无活动账号 → 空切片（C5：不追加任何元素）。
+func (s *VPNService) buildCampaignElements(ctx context.Context, userID string) []*models.VPNSubscribeResponse {
+	rows, err := s.vpnRepo.ListCurrentByUserAndFace(ctx, userID, models.ProductFaceCampaign)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	out := make([]*models.VPNSubscribeResponse, 0, len(rows))
+	for _, vp := range rows {
+		if el := s.buildCampaignElementFor(ctx, userID, vp); el != nil {
+			out = append(out, el)
+		}
+	}
+	return out
+}
+
+// buildCampaignElementFor 构造【单条】活动面 provision 的 /vpn/all 元素（契约 §3）。
+func (s *VPNService) buildCampaignElementFor(ctx context.Context, userID string, vp *models.VPNProvision) *models.VPNSubscribeResponse {
+	if vp == nil {
 		return nil
 	}
 	if vp.Status != models.VPNProvisionStatusActive && vp.Status != models.VPNProvisionStatusExpired {
@@ -525,14 +542,19 @@ func (s *VPNService) buildCampaignElement(ctx context.Context, userID string) *m
 		Status:   status,
 		Channel:  models.PlanTierCampaign,
 		PlanTier: models.PlanTierCampaign,
-		// ★契约 C3（2026-08-20 修订，Q1 方案 B）：service_tier 下发 promo，不再是 standard。
-		// 原因：iOS/macOS 分键实际是 `serviceTier ?? planTier`（service_tier 优先、plan_tier 仅回退），
-		// 下发 standard 会让活动面与 basic 面算出同一个 accountKey/profile 名而互相覆盖——严重方向是
-		// 付费用户的正式 Basic 配置被活动配置顶掉。服务端四层（入口闸/product_face 分区/uuid 复用/
-		// otun 账号唯一键）本已隔离，但覆盖发生在端上落盘，只能靠下发值区分。
-		// 注意：这里改的只是【下发值】；DB 持久化的 service_tier 是该权益的真实线路
-		// （standard 或 residential，见迁移 003/036），分区键是 product_face，均不受影响。
-		ServiceTier: models.ProductFaceCampaign,
+		// ★契约 v0.6（2026-08-21）：service_tier 如实下发该权益的线路（standard / residential），
+		// 不再压平成 promo。
+		//
+		// 产品面本就是二维矩阵 (plan_tier × service_tier)：plan_tier 说"哪个产品面"，
+		// service_tier 说"哪条线路"。v0.5 的 C3 把它压平成一维（service_tier=promo），是为了
+		// 迁就端上 `serviceTier ?? planTier` 的【单键】实现——活动面只有一条线路时勉强够用。
+		// 活动面支持住宅线路后（迁移 003/036）promo 面有了两条线路，压平会让两个活动元素
+		// 算出同一个 accountKey 互相覆盖，单键彻底走不通。
+		//
+		// v0.6 起端上分键改为二元组 (plan_tier, service_tier)，四条线天然分开：
+		//   basic+standard / residential+residential / promo+standard / promo+residential
+		// 无需任何新字段或新枚举值——矩阵本来就在 DB 里，这里只是如实透传。
+		ServiceTier: vp.ServiceTier,
 		// ★契约 §10-7（2026-08-20，Q7）：活动面不下发 subscribe_url。
 		// 该口不分面、恒返回 basic 配置，端上若拿它刷新活动配置必然刷错；三端已确认刷新路径只认
 		// protocols[]（活动 uuid）。留着是纯陷阱，故不下发。
