@@ -85,12 +85,24 @@ func NewPool(dsn string) (*pgxpool.Pool, error) {
 // EnsureCampaignSchema 幂等地保证迁移 010（vpn_provisions.product_face + 回填 + campaign_grants）已生效。
 // ★验收 F2/F5 同型：新码读路径 vpnColumns 含 product_face，010 前起不来；老码在 010 后不写 product_face，
 // 窗口期新建的 residential 行会落成 basic。新镜像启动即跑这组 IF NOT EXISTS 语句 + 幂等回填，把"跑迁移"和
-// "起新码"合成一步；手工再跑 010 也无害。回填 UPDATE 每次启动都跑（只动 service_tier='residential' 且
-// product_face 不对的行，campaign 行 service_tier=standard 不受影响）。
+// "起新码"合成一步；手工再跑 010 也无害。
+//
+// ★2026-08-21 P1 修复：回填 UPDATE 原本只按 service_tier 判定，注释里"campaign 行 service_tier=standard
+// 不受影响"的前提，在活动面支持住宅线路（promo × residential）后【已不成立】——
+// plan_tier='promo' 且 service_tier='residential' 的活动行会匹配上，被改写成 product_face='residential'，
+// 与付费住宅套餐挤同一面；GetCurrentByUserAndServicePartition 的 LIMIT 1 让活动券 10GB 顶替付费 100GB，
+// 且该读路径不受能力头门控（老客户端同样中招）。
+// 因为发生在【启动路径】而非任何 provision 写路径，静态排查 provisionCampaign/ProductFaceFor/
+// UpdateProjection/cleanup 全都扑空，且"改回 promo 后读一次仍是 promo"的对照实验也无法证伪——
+// 真正的触发条件是【服务重启】（autodeploy timer 每轮拉新镜像都会重启）。
+// 修复：回填显式排除活动面（沿用 repo 层 notCampaign 同款谓词，并排旧值 'campaign' 以免迁移 011 窗口期漏网）。
 func EnsureCampaignSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	stmts := []string{
 		`ALTER TABLE fulfillment.vpn_provisions ADD COLUMN IF NOT EXISTS product_face VARCHAR(16) NOT NULL DEFAULT 'basic'`,
-		`UPDATE fulfillment.vpn_provisions SET product_face = 'residential' WHERE service_tier = 'residential' AND product_face <> 'residential'`,
+		// ★活动面（promo/campaign）绝不参与本回填：promo × residential 是合法组合，其 face 必须留在 promo。
+		`UPDATE fulfillment.vpn_provisions SET product_face = 'residential'
+		   WHERE service_tier = 'residential' AND product_face <> 'residential'
+		     AND COALESCE(product_face, 'basic') NOT IN ('promo', 'campaign')`,
 		`CREATE INDEX IF NOT EXISTS idx_vpn_provisions_user_face_current ON fulfillment.vpn_provisions(user_id, product_face) WHERE is_current = TRUE`,
 		`CREATE TABLE IF NOT EXISTS fulfillment.campaign_grants (
 			subscription_id VARCHAR(256) PRIMARY KEY,
