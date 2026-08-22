@@ -416,6 +416,12 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 		}
 
 		// Same channel renewal: update existing record in-place
+		// ★expire_at 必须同步写回：上面算出的 expireAt 已推给 otun（syncOtunUserQuota），
+		// 若不写回本行，投影行会滞留在续期前的旧到期时间——真实管控（realm_users /
+		// otun users 的 expire_at）是新值、用户能正常连接，但 /vpn/subscribe-all 与
+		// /vpn/status 按投影行下发，App 会显示"已过期"。channel upgrade 分支（上方
+		// newVP.ExpireAt）与首次开通分支都写了，唯独此处漏赋值。
+		existing.ExpireAt = &expireAt
 		existing.TrafficLimit = trafficLimit
 		existing.SubscriptionID = req.SubscriptionID
 		existing.BusinessType = businessType
