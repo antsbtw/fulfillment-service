@@ -542,6 +542,10 @@ func (s *VPNService) buildCampaignElementFor(ctx context.Context, userID string,
 		Status:   status,
 		Channel:  models.PlanTierCampaign,
 		PlanTier: models.PlanTierCampaign,
+		// ★BACKEND_ANSWERS_VPN_ALL_FIELDS §1（方案 a）：活动面 otun 账号 uuid。活动面与 basic
+		// 面是两个独立 otun 账号（唯一键 (auth_user_id, product_face)），此处必须取活动面自己的
+		// uuid——端上正是靠它把一次投诉对应到具体账号。
+		VPNUserID: derefStr(vp.OtunUUID),
 		// ★契约 v0.6（2026-08-21）：service_tier 如实下发该权益的线路（standard / residential），
 		// 不再压平成 promo。
 		//

@@ -944,6 +944,15 @@ func sameTime(a, b *time.Time) bool {
 	return d < time.Second
 }
 
+// derefStr 解引用可空字符串指针，nil → ""。用于把 *string 列（如 VPNProvision.OtunUUID）
+// 填进值类型的响应字段；配合 omitempty，nil 时该键不出现在 JSON 里。
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 func derefTime(t *time.Time) time.Time {
 	if t == nil {
 		return time.Time{}

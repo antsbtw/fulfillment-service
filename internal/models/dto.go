@@ -306,6 +306,18 @@ type VPNSubscribeResponse struct {
 	Channel      string        `json:"channel"`
 	PlanTier     string        `json:"plan_tier"`
 	ServiceTier  string        `json:"service_tier"`
+	// ★BACKEND_ANSWERS_VPN_ALL_FIELDS §1（2026-08-20，方案 a）：该面 otun 账号 uuid。
+	// 此前本结构体【从未定义过】该字段（非 omitempty 未输出），导致端上四个面的账号 uuid
+	// 全部落盘为空串——不阻塞功能（服务端所有取配置的口都按 JWT/user_id，无一需要端上回传
+	// uuid），但排障时无法把一次投诉对应到具体 otun 账号。
+	//
+	// 为何不让端上从 protocols[] URL 解析（方案 b）：那会把 uuid 的真源移到客户端，且实际
+	// 走不通——shadowsocks 的用户段 base64 解开是 method:password，压根不含 uuid；vmess 要
+	// 先 base64 解 JSON 取 id；tuic 后面还跟 :password。若某用户套餐只含 ss，方案 b 直接失效。
+	//
+	// omitempty：uuid 缺失（provision 尚未拿到 otun 账号，如 status=provisioning）时不输出键，
+	// 与端上可选字段声明一致；有值时三个面（basic/residential/promo）都填。
+	VPNUserID    string        `json:"vpn_user_id,omitempty"`
 	// omitempty：★契约 Q7——活动面(campaign/promo)不下发本字段（该口不分面、恒返回 basic 配置，
 	// 端上拿它刷活动配置必然刷错）。basic/residential 恒有值，键位与现网逐字节一致（golden 锁定）。
 	SubscribeURL string        `json:"subscribe_url,omitempty"`

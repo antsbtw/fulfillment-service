@@ -4,6 +4,7 @@
     "channel": "stripe",
     "plan_tier": "basic",
     "service_tier": "standard",
+    "vpn_user_id": "otun-std-uuid",
     "subscribe_url": "https://portal.example.test/api/v1/my/vpn/subscribe",
     "device_id": "u-golden",
     "protocols": [
@@ -36,6 +37,7 @@
     "channel": "apple",
     "plan_tier": "residential",
     "service_tier": "residential",
+    "vpn_user_id": "otun-res-uuid",
     "subscribe_url": "https://portal.example.test/api/v1/my/vpn/subscribe",
     "device_id": "u-golden",
     "protocols": [

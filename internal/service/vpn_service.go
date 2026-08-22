@@ -980,6 +980,8 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 		Channel:       vp.Channel,
 		PlanTier:      vp.PlanTier,
 		ServiceTier:   vp.ServiceTier,
+		// ★BACKEND_ANSWERS_VPN_ALL_FIELDS §1（方案 a）：该面 otun 账号 uuid（basic/residential）。
+		VPNUserID:     derefStr(vp.OtunUUID),
 		// B6（2026-07-08 整改）：subscribe_url 是【下发给客户端】的刷新地址，必须公网可达——
 		// 指本服务自己的公网路由 /api/v1/my/vpn/subscribe（portal nginx /api/v1/my/ 已分发，
 		// JWT 同 App 现有调用），双面通用。★别再拼 OTunManagerURL：那是内网互调地址
