@@ -12,6 +12,23 @@ import (
 	"time"
 )
 
+// OTunAccountInactiveError 表示 otun-manager 明确判定该账号【当前不可用】——
+// otun-manager 两处均返回 403：subscribe_handler 的 subscription_expired（订阅到期）
+// 与 user_handler 的 user disabled（配额耗尽/被禁用）。
+//
+// 与"取不到数据"（网络错误、5xx）必须区分：前者是到期的正面证据，调用方应据此把该面
+// 判为 expired；后者只是读失败，不能推断到期，否则 otun-manager 抖动就会让全体用户
+// 误显"已过期"。用 errors.As 判定，不要 strings.Contains 错误文本
+// （错误文案会变，字符串匹配是静默失效的假判据）。
+type OTunAccountInactiveError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *OTunAccountInactiveError) Error() string {
+	return fmt.Sprintf("otun account inactive (status %d): %s", e.StatusCode, e.Body)
+}
+
 // OTunClient calls otun-manager to manage VPN users
 type OTunClient struct {
 	baseURL        string
@@ -341,6 +358,12 @@ func (c *OTunClient) SyncUser(ctx context.Context, uuid string) (*SubscribeRespo
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	// 403 = otun-manager 明确拒绝：subscription_expired（订阅到期）或 user disabled
+	// （配额耗尽/禁用）。返回 typed error，让调用方能把它与"读失败"区分开。
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, &OTunAccountInactiveError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	if resp.StatusCode != http.StatusOK {

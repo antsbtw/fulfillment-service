@@ -1204,25 +1204,62 @@ func (s *VPNService) GetUserVPNQuickStatus(ctx context.Context, userID string) (
 	return s.buildQuickStatus(ctx, vp), nil
 }
 
+// isOTunAccountInactive 判断 sync 错误是否为"otun 侧明确判定该账号不可用"（403）。
+// 用 errors.As 而非匹配错误文本——文案变更会让字符串判据静默失效。
+func isOTunAccountInactive(err error) bool {
+	var inactive *client.OTunAccountInactiveError
+	return errors.As(err, &inactive)
+}
+
+// effectiveProvisionStatus 投影行状态的【读时判定】：status=active 但 expire_at 已过 →
+// 视为 expired。与 subscription-service 的 effectiveStatus()（subscription_service.go）
+// 及 admin_filter.go 的 effectiveStatusSQL 同口径，避免两侧对"是否还持有"判断分裂。
+//
+// ★为什么必须读时判定而不是等回写：到期【没有任何写路径】会去改 vpn_provisions.status——
+// 订阅到期由 otun-manager 侧 disable 账号，投影行原地不动（Alvin 的 basic 面 2026-08-23
+// Apple 到期，投影行 status 仍 active、expire_at 仍滞留 07-15）。生产实测这类行有 507 条。
+// 读时判定对存量与新增一并生效，无需迁移回填，也不与既有定时任务抢写。
+func effectiveProvisionStatus(status string, expireAt *time.Time) string {
+	if status == models.VPNProvisionStatusActive && expireAt != nil && expireAt.Before(time.Now()) {
+		return models.VPNProvisionStatusExpired
+	}
+	return status
+}
+
 // buildQuickStatus 根据【单条】provision 构造轻量状态（含 otun-manager 实时流量/到期回填）。
 // 从 GetUserVPNQuickStatus 抽出，供 GetUserVPNQuickStatusAll 按服务面分别复用。
 func (s *VPNService) buildQuickStatus(ctx context.Context, vp *models.VPNProvision) *models.VPNQuickStatus {
 	resp := &models.VPNQuickStatus{
-		Status:       vp.Status,
+		Status:       effectiveProvisionStatus(vp.Status, vp.ExpireAt),
 		Channel:      vp.Channel,
 		PlanTier:     vp.PlanTier,
 		TrafficLimit: vp.TrafficLimit,
 		TrafficUsed:  vp.TrafficUsed,
+	}
+	// 投影行的 expire_at 先作为兜底下发；下面 otun-manager 有实时值时再覆盖。
+	// 否则到期面在 sync 失败时既不下发 expire_at、status 又是 active，端上无从判断。
+	if vp.ExpireAt != nil {
+		resp.ExpireAt = vp.ExpireAt.UTC().Format(time.RFC3339)
 	}
 
 	// Get real-time traffic_used and expire_at from otun-manager
 	otunUsedKnown := false
 	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
 		syncResp, err := s.otunClient.SyncUser(ctx, *vp.OtunUUID)
-		if err == nil && syncResp != nil {
+		switch {
+		case err == nil && syncResp != nil:
 			resp.ExpireAt = syncResp.ExpireAt
 			resp.TrafficUsed = syncResp.TrafficUsed
 			otunUsedKnown = true
+		case isOTunAccountInactive(err):
+			// ★403 subscription_expired / user disabled 是"该面已停用"的【正面证据】，
+			// 不是取不到数据。原先 err != nil 一律吞掉 → 投影行的陈旧 active 直接下发，
+			// 端上显示"仍有效"而实际连不上（Alvin basic 面即此路径）。
+			resp.Status = models.VPNProvisionStatusExpired
+		default:
+			// 其余错误（网络/5xx）不足以断言到期，保持读时判定的结果，避免误报到期。
+			log.Printf("[VPNService] sync otun user failed (uuid=%s face=%s): %v",
+				*vp.OtunUUID, vp.EffectiveProductFace(), err)
 		}
 	}
 
