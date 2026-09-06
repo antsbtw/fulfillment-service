@@ -145,6 +145,33 @@ func (r *VPNProvisionRepository) ListCurrentByUserAndFace(ctx context.Context, u
 	return out, rows.Err()
 }
 
+// ListCurrentByUser 取该 user【所有产品面、所有状态】的 current 行（封禁/解封联动用）。
+//
+// 不按 status 过滤：封禁要拿到 active 行去停，解封要拿到 suspended 行去恢复；
+// 不按面过滤：封禁是账号级动作，basic / residential / promo 三个面一律处理。
+// 排序固定（面 → 线路 → 时间）便于日志与响应稳定。
+func (r *VPNProvisionRepository) ListCurrentByUser(ctx context.Context, userID string) ([]*models.VPNProvision, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM fulfillment.vpn_provisions
+		WHERE user_id = $1 AND is_current = TRUE
+		ORDER BY COALESCE(product_face, 'basic') ASC, COALESCE(service_tier, 'standard') ASC, created_at DESC
+	`, vpnColumns)
+	rows, err := r.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*models.VPNProvision, 0, 3)
+	for rows.Next() {
+		vp, serr := r.scanOne(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		out = append(out, vp)
+	}
+	return out, rows.Err()
+}
+
 // GetCurrentByUserFaceAndTier 在某产品面内【再按线路细分】取 current 行。
 //
 // ★为什么活动面需要这一层：迁移 003/036 后 promo 面可同时存在两条线路的账号——

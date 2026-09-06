@@ -36,6 +36,8 @@ type vpnProvisionStore interface {
 	GetCurrentByUserFaceAndTier(ctx context.Context, userID, face, serviceTier string) (*models.VPNProvision, error)
 	// ListCurrentByUserAndFace 取该面【全部】current 行（活动面每条线路一行）。
 	ListCurrentByUserAndFace(ctx context.Context, userID, face string) ([]*models.VPNProvision, error)
+	// ListCurrentByUser：账号级封禁/解封用——所有面、所有状态的 current 行。
+	ListCurrentByUser(ctx context.Context, userID string) ([]*models.VPNProvision, error)
 	GetOtunUUIDByUserAndFace(ctx context.Context, userID, face string) (*string, error)
 	GetBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error)
 	Create(ctx context.Context, vp *models.VPNProvision) error
@@ -1333,6 +1335,9 @@ func (s *VPNService) GetUserVPNSubscribeConfigAllWithCaps(ctx context.Context, u
 			vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
 			if err != nil || vp == nil {
 				continue // 该面未持有
+			}
+			if vp.Status == models.VPNProvisionStatusSuspended {
+				continue // 账号封禁：不下发配置（status-all 仍如实回 suspended）
 			}
 			resp, err := s.buildSubscribeResponse(ctx, vp, userID)
 			if err != nil {

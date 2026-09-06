@@ -75,6 +75,51 @@ func (h *Handler) Deprovision(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// SuspendVPNByUser 账号级封禁联动（auth-service 在 users.status→suspended 时调用）：
+// 停掉该用户【所有面】当前持有的 VPN 授权（otun disable → 节点一分钟内踢下线），
+// 投影行 status=suspended 但保持 is_current、不动订阅，可由 ResumeVPNByUser 原样恢复。
+// POST /api/internal/vpn/user/:user_id/suspend  body: {"reason": "..."}
+func (h *Handler) SuspendVPNByUser(c *gin.Context) {
+	h.accessCascade(c, true)
+}
+
+// ResumeVPNByUser 解封联动（users.status→active）：suspended 行翻回 active + otun enable（已到期的面不启用）。
+// POST /api/internal/vpn/user/:user_id/resume  body: {"reason": "..."}
+func (h *Handler) ResumeVPNByUser(c *gin.Context) {
+	h.accessCascade(c, false)
+}
+
+func (h *Handler) accessCascade(c *gin.Context, suspend bool) {
+	userID := c.Param("user_id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	var (
+		res *service.AccessCascadeResult
+		err error
+	)
+	if suspend {
+		res, err = h.vpnService.SuspendVPNByUser(c.Request.Context(), userID, req.Reason)
+	} else {
+		res, err = h.vpnService.ResumeVPNByUser(c.Request.Context(), userID, req.Reason)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// 没有任何 current 行：404 让调用方区分"无授权可停"与"停了"（幂等：auth 侧按 404 视作完成）。
+	if len(res.Faces) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no current VPN provision for this user", "user_id": userID})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
 // DeprovisionVPNByUser 按 user_id 回收某用户当前的 VPN 用户（订阅换绑时由 subscription-service 调用）。
 // 用户无可回收的 VPN 用户时返回 404（调用方视为幂等成功）。
 func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {

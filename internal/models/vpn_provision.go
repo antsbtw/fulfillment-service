@@ -17,6 +17,11 @@ const (
 	VPNProvisionStatusDisabled  = "disabled"
 	VPNProvisionStatusRevoked   = "revoked"
 	VPNProvisionStatusConverted = "converted"
+	// VPNProvisionStatusSuspended：账号被封禁（auth users.status=suspended 联动）。
+	// 与 disabled/revoked 的区别：行保持 is_current=true、订阅不动、otun 账号只 disable 不删，
+	// 解封（ResumeVPNByUser）翻回 active 即可恢复，不需要重新开通。/vpn/all 不下发该面元素，
+	// status-all 如实回 "suspended"。
+	VPNProvisionStatusSuspended = "suspended"
 )
 
 // VPN service tier constants

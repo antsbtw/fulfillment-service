@@ -166,6 +166,11 @@ func (s *Server) setupRoutes() {
 		// 订阅换绑时回收旧登录账号的 VPN 用户)
 		internal.POST("/vpn/user/:user_id/deprovision", s.handler.DeprovisionVPNByUser)
 
+		// ★账号级封禁/解封联动（auth-service 在 users.status 变更时调用）：所有面一起停/恢复，
+		// 与 deprovision 的区别是可逆（status=suspended、is_current 不动、订阅不动、otun 只 disable 不删）。
+		internal.POST("/vpn/user/:user_id/suspend", s.handler.SuspendVPNByUser)
+		internal.POST("/vpn/user/:user_id/resume", s.handler.ResumeVPNByUser)
+
 		// ★第三产品面 campaign（document/marketing-campaign/*）：撤销扣减（subscription-service 调）+
 		// 活动账号读口（campaign-service 叠加闸 / me / preview 调）。开通仍走 POST /provision（plan_tier=campaign）。
 		internal.POST("/vpn/campaign/revoke", s.handler.RevokeCampaign)

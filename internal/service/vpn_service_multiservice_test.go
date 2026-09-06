@@ -52,6 +52,17 @@ func (f *fakeVPNStore) ListCurrentByUserAndFace(_ context.Context, userID, face 
 	return out, nil
 }
 
+// ListCurrentByUser：所有面、所有状态的 current 行（封禁/解封联动）。
+func (f *fakeVPNStore) ListCurrentByUser(_ context.Context, userID string) ([]*models.VPNProvision, error) {
+	out := []*models.VPNProvision{}
+	for _, r := range f.rows {
+		if r.UserID == userID && r.IsCurrent {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 // GetCurrentByUserFaceAndTier 在面内再按线路细分（镜像 SQL 的 COALESCE(service_tier,'standard')）。
 func (f *fakeVPNStore) GetCurrentByUserFaceAndTier(_ context.Context, userID, face, serviceTier string) (*models.VPNProvision, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {
