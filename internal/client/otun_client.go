@@ -23,10 +23,31 @@ import (
 type OTunAccountInactiveError struct {
 	StatusCode int
 	Body       string
+	// Code 是 otun-manager 403 响应体 JSON 的 error 字段（subscription_expired / trial_expired /
+	// traffic_exhausted / user_disabled…），结构化解析而非文本匹配；解析不到为空串。
+	// handler 层只把 subscription_expired / trial_expired 升成 403 SUBSCRIPTION_EXPIRED。
+	Code string
 }
 
 func (e *OTunAccountInactiveError) Error() string {
 	return fmt.Sprintf("otun account inactive (status %d): %s", e.StatusCode, e.Body)
+}
+
+// IsSubscriptionExpired 是否为"订阅/试用到期"这一类（区别于超限/人工禁用）。
+func (e *OTunAccountInactiveError) IsSubscriptionExpired() bool {
+	return e.Code == "subscription_expired" || e.Code == "trial_expired"
+}
+
+// newOTunAccountInactiveError 从 otun-manager 403 响应构造 typed error，顺带解析 error 码。
+func newOTunAccountInactiveError(statusCode int, body []byte) *OTunAccountInactiveError {
+	e := &OTunAccountInactiveError{StatusCode: statusCode, Body: string(body)}
+	var parsed struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) == nil {
+		e.Code = parsed.Error
+	}
+	return e
 }
 
 // OTunClient calls otun-manager to manage VPN users
@@ -363,7 +384,7 @@ func (c *OTunClient) SyncUser(ctx context.Context, uuid string) (*SubscribeRespo
 	// 403 = otun-manager 明确拒绝：subscription_expired（订阅到期）或 user disabled
 	// （配额耗尽/禁用）。返回 typed error，让调用方能把它与"读失败"区分开。
 	if resp.StatusCode == http.StatusForbidden {
-		return nil, &OTunAccountInactiveError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return nil, newOTunAccountInactiveError(resp.StatusCode, respBody)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -490,6 +511,12 @@ func (c *OTunClient) GetRealmConnectURL(ctx context.Context, userUUID string) (*
 	// 未分配出口（404 no_assignment）等视为"暂无 realm URL"，返回 nil 让调用方降级，不报错中断。
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
+	}
+	// 403 = otun-manager 明确判定该 realm 账号不可用（2026-09-06 起 connect-url 对到期/禁用账号
+	// 返 subscription_expired / traffic_exhausted / user_disabled）。typed error 让 /subscribe 的
+	// handler 按 Code 回 403 SUBSCRIPTION_EXPIRED（与标准面同码），/subscribe-all 跳过该面。
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, newOTunAccountInactiveError(resp.StatusCode, respBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("otun-manager realm connect-url status %d: %s", resp.StatusCode, string(respBody))

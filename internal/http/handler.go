@@ -432,7 +432,11 @@ func (h *Handler) GetUserVPNSubscribe(c *gin.Context) {
 //     BFF 原样透传后 App 可引导续费,而不是当成未知 500(实测会拿空配置强启内核报 kernel_fatal);
 //   - 其余(provision 缺失/下游抖动) → 维持原 404 语义不动。
 func respondVPNConfigError(c *gin.Context, err error) {
-	if errors.Is(err, service.ErrNoActiveSubscription) || strings.Contains(err.Error(), "subscription_expired") {
+	// otun-manager 403 typed error（标准面 /api/subscribe、住宅面 realm/connect-url 两处）按结构化
+	// Code 判到期；文本兜底保留给尚未 typed 化的路径。超限/人工禁用不属"到期"，维持原 404。
+	var inactive *client.OTunAccountInactiveError
+	expiredByCode := errors.As(err, &inactive) && inactive.IsSubscriptionExpired()
+	if errors.Is(err, service.ErrNoActiveSubscription) || expiredByCode || strings.Contains(err.Error(), "subscription_expired") {
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"code":    "SUBSCRIPTION_EXPIRED",
