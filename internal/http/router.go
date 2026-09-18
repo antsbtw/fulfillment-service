@@ -216,6 +216,7 @@ func (s *Server) setupRoutes() {
 	{
 		public.GET("/regions", s.handler.GetRegions)
 		public.GET("/trial/config", s.handler.GetTrialConfig) // 试用配置（公开）
+		public.GET("/whoami", s.handler.Whoami)               // 出口 IP/国家（App 隧道可达探测判据）
 	}
 
 	// Internal Admin API (供 user-portal 调用，需要 Internal Secret)
