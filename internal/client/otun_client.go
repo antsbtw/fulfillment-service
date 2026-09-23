@@ -79,6 +79,8 @@ type CreateVPNUserRequest struct {
 	TrafficLimit int64    `json:"traffic_limit"`
 	ExpireAt     string   `json:"expire_at"`
 	ServiceTier  string   `json:"service_tier,omitempty"` // basic, premium, residential
+	// ★付费同渠道叠加续购（2026-09-23）：true = 在未过期权益上叠加，otun-manager 不清零 traffic_used。
+	PreserveTrafficUsed bool `json:"preserve_traffic_used,omitempty"`
 	// ProductFace 产品面（otun-manager users.product_face，迁移 034）：basic(缺省) / campaign。
 	// otun 侧 (auth_user_id, product_face) 唯一——campaign 活动账号与 basic 账号同 auth_user_id 并存。
 	ProductFace string `json:"product_face,omitempty"`
@@ -106,6 +108,8 @@ type UpdateVPNUserRequest struct {
 	// ServiceTier 套餐升降级（如 standard→residential）才传；空则 manager 保留原值。
 	// 修复：已存在用户升级套餐时 service_tier 不更新 → residential 链在 UpdateUser 路径断。
 	ServiceTier string `json:"service_tier,omitempty"`
+	// ★付费同渠道叠加续购（2026-09-23）：同 CreateVPNUserRequest.PreserveTrafficUsed。
+	PreserveTrafficUsed bool `json:"preserve_traffic_used,omitempty"`
 }
 
 // VPNUserInfo contains VPN user details

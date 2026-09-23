@@ -358,6 +358,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 		// - trial/gift → stripe: channel upgrade, fresh period (don't stack free trial time)
 		// - stripe → stripe: user paid money, stack on remaining time if not expired
 		var expireAt time.Time
+		stacked := false // 付费同渠道叠加：true 时上限已累加、下发不清零已用
 		switch req.Channel {
 		case "apple", "google", "trial", "gift":
 			expireAt = s.calculateExpireAt(expireDays)
@@ -369,12 +370,27 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 				log.Printf("[VPNService] Channel upgrade %s → %s: fresh period, expire=%s",
 					existing.Channel, req.Channel, expireAt.Format(time.RFC3339))
 			} else {
-				// Same paid channel renewal (e.g., stripe → stripe): stack on remaining time
-				expireAt = s.calculateExpireAtWithStacking(ctx, vpnUserID, expireDays)
+				// Same paid channel renewal (e.g., stripe → stripe): stack on remaining time.
+				// ★2026-09-23：叠加基准优先取 otun-manager 实时账号（两面都可读，住宅 uuid 由
+				// manager 按 uuid 分流），取不到时退回本服务投影行——此前取不到就静默退化成
+				// now+30d，住宅面因 GetUser 恒 404 叠加失效近三个月而无人察觉（euanjam8 案）。
+				live, lerr := s.otunClient.GetUser(ctx, vpnUserID)
+				if lerr != nil {
+					log.Printf("[VPNService] stacking: otun-manager GetUser failed (uuid=%s), falling back to projection row: %v", vpnUserID, lerr)
+					live = nil
+				}
+				expireAt, trafficLimit, stacked = resolvePaidStacking(existing, live, time.Now(), expireDays, trafficLimit)
+				if stacked {
+					log.Printf("[VPNService] Paid purchase stacking: uuid=%s expire→%s limit→%d (used preserved)",
+						vpnUserID, expireAt.Format(time.RFC3339), trafficLimit)
+				} else {
+					log.Printf("[VPNService] Paid purchase renewal after expiry: uuid=%s fresh period, expire=%s",
+						vpnUserID, expireAt.Format(time.RFC3339))
+				}
 			}
 		}
 
-		if err := s.syncOtunUserQuota(ctx, vpnUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt); err != nil {
+		if err := s.syncOtunUserQuota(ctx, vpnUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt, stacked); err != nil {
 			log.Printf("[VPNService] Warning: failed to update existing VPN user: %v", err)
 		} else {
 			log.Printf("[VPNService] Updated existing VPN user %s: expire=%s, traffic=%d",
@@ -455,7 +471,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 	if existingOtunUUID != nil && *existingOtunUUID != "" {
 		// Reuse existing otun_uuid (e.g., trial → purchase conversion)
 		actualVPNUserID = *existingOtunUUID
-		if err := s.syncOtunUserQuota(ctx, actualVPNUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt); err != nil {
+		if err := s.syncOtunUserQuota(ctx, actualVPNUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt, false); err != nil {
 			return nil, fmt.Errorf("failed to update existing VPN user: %w", err)
 		}
 
@@ -656,24 +672,29 @@ func (s *VPNService) resolveDeprovisionTarget(ctx context.Context, userID string
 // 此前续期/trial→购买转换两条路径对 residential 也打 PUT,404 被 Warning 吞掉,
 // 导致 realm_users.traffic_limit 永远停在首开(trial)值——正式 100GB 下发不进真源,
 // App 流量回显(真源=realm_users)一直显示 trial 的 10GB。
-func (s *VPNService) syncOtunUserQuota(ctx context.Context, otunUUID, serviceTier, authUserID, email string, trafficLimit int64, expireAt time.Time) error {
+//
+// preserveUsed=true（付费同渠道叠加，2026-09-23）：告诉 otun-manager 这是"同一桶延长"，
+// 不要按"新到期更晚"清零 traffic_used（上限已由调用方累加）。其余路径传 false，行为不变。
+func (s *VPNService) syncOtunUserQuota(ctx context.Context, otunUUID, serviceTier, authUserID, email string, trafficLimit int64, expireAt time.Time, preserveUsed bool) error {
 	if serviceTier == models.ServiceTierResidential {
 		_, err := s.otunClient.CreateUser(ctx, &client.CreateVPNUserRequest{
-			UUID:         otunUUID, // 兼容携带;UPSERT 实际按 auth_user_id 定位,uuid 不变
-			AuthUserID:   authUserID,
-			Email:        email,
-			TrafficLimit: trafficLimit,
-			ExpireAt:     expireAt.Format(time.RFC3339),
-			ServiceTier:  serviceTier,
+			UUID:                otunUUID, // 兼容携带;UPSERT 实际按 auth_user_id 定位,uuid 不变
+			AuthUserID:          authUserID,
+			Email:               email,
+			TrafficLimit:        trafficLimit,
+			ExpireAt:            expireAt.Format(time.RFC3339),
+			ServiceTier:         serviceTier,
+			PreserveTrafficUsed: preserveUsed,
 		})
 		return err
 	}
 	enabled := true
 	return s.otunClient.UpdateUser(ctx, otunUUID, &client.UpdateVPNUserRequest{
-		TrafficLimit: trafficLimit,
-		ExpireAt:     expireAt.Format(time.RFC3339),
-		Enabled:      &enabled,
-		ServiceTier:  serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
+		TrafficLimit:        trafficLimit,
+		ExpireAt:            expireAt.Format(time.RFC3339),
+		Enabled:             &enabled,
+		ServiceTier:         serviceTier, // 套餐升降级时更新 tier（修复 standard→residential 不变）
+		PreserveTrafficUsed: preserveUsed,
 	})
 }
 
@@ -1668,40 +1689,38 @@ func (s *VPNService) calculateExpireAt(days int) time.Time {
 	return time.Now().AddDate(0, 0, days)
 }
 
-// calculateExpireAtWithStacking queries otun-manager for the user's current expire_at,
-// and stacks the new days on top if the subscription hasn't expired yet.
-// Used for paid purchases (Stripe etc) to protect the user's remaining time.
-func (s *VPNService) calculateExpireAtWithStacking(ctx context.Context, vpnUserID string, days int) time.Time {
+// resolvePaidStacking 付费同渠道再购（stripe→stripe / credit→credit …）的叠加裁决（纯函数，2026-09-23）。
+//
+// 规则（用户 2026-09-23 拍板，与 campaign 面 "7天10G+7天10G=14天20G" 及形态 B §2 订购桶同口径）：
+//   - 基准权益未过期 → 到期 = 基准到期 + days；上限 = 基准上限 + newLimit；stacked=true（已用保留）。
+//   - 基准已过期/缺失 → 到期 = now + days；上限 = newLimit；stacked=false（fresh period，与现状一致）。
+//
+// 基准取值：优先 otun-manager 实时账号 live（数据面真源，"用户实际还剩多少"），
+// live 为 nil 或 expire_at 不可解析时退回投影行 existing。此前只认 live、取不到就 now+days，
+// 住宅 uuid 在 manager 恒 404 → 叠加静默失效三个月（euanjam8 案）。
+func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo, now time.Time, days int, newLimit int64) (time.Time, int64, bool) {
 	if days <= 0 {
 		days = 30
 	}
-
-	userInfo, err := s.otunClient.GetUser(ctx, vpnUserID)
-	if err != nil {
-		log.Printf("[VPNService] Failed to get current user info for stacking, using time.Now(): %v", err)
-		return time.Now().AddDate(0, 0, days)
+	var baseExpire *time.Time
+	var baseLimit int64
+	if live != nil && live.ExpireAt != "" {
+		if t, err := time.Parse(time.RFC3339, live.ExpireAt); err == nil {
+			baseExpire = &t
+			baseLimit = live.TrafficLimit
+		} else {
+			log.Printf("[VPNService] stacking: unparsable live expire_at %q, falling back to projection row: %v", live.ExpireAt, err)
+		}
 	}
-
-	if userInfo.ExpireAt == "" {
-		return time.Now().AddDate(0, 0, days)
+	if baseExpire == nil && existing != nil && existing.ExpireAt != nil {
+		t := *existing.ExpireAt
+		baseExpire = &t
+		baseLimit = existing.TrafficLimit
 	}
-
-	currentExpire, err := time.Parse(time.RFC3339, userInfo.ExpireAt)
-	if err != nil {
-		log.Printf("[VPNService] Failed to parse expire_at '%s': %v", userInfo.ExpireAt, err)
-		return time.Now().AddDate(0, 0, days)
+	if baseExpire == nil || !baseExpire.After(now) {
+		return now.AddDate(0, 0, days), newLimit, false
 	}
-
-	// If still active, stack new days on top of remaining time
-	if currentExpire.After(time.Now()) {
-		newExpire := currentExpire.AddDate(0, 0, days)
-		log.Printf("[VPNService] Paid purchase stacking: current expires %s + %d days = %s",
-			currentExpire.Format(time.RFC3339), days, newExpire.Format(time.RFC3339))
-		return newExpire
-	}
-
-	// Already expired, start fresh
-	return time.Now().AddDate(0, 0, days)
+	return baseExpire.AddDate(0, 0, days), baseLimit + newLimit, true
 }
 
 // notifyVPNActive notifies subscription-service that VPN is active
