@@ -32,7 +32,7 @@ func hv2Pool(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(context.Background(), `DELETE FROM fulfillment.hosting_provisions WHERE user_id LIKE 'hv2-%'`); err != nil {
+	if _, err := pool.Exec(context.Background(), `DELETE FROM fulfillment.hosting_provisions WHERE user_id LIKE 'hv2-%'; DELETE FROM fulfillment.hosting_setup_deferred WHERE user_id LIKE 'hv2-%'`); err != nil {
 		t.Fatal(err)
 	}
 	return pool
@@ -126,8 +126,11 @@ func TestProvision_OwnerKeyCreatesV2AndForwardsKey(t *testing.T) {
 	s := hv2Service(pool, hosting.URL)
 
 	key := edKey(t) + " iPhone"
+	// 该用户购买时选了延迟开通;用户主动建机不受约束
+	s.hostingRepo.MarkSetupDeferred(context.Background(), "hv2-u4", "sub-hv2-4")
 	resp, err := s.Provision(context.Background(), &models.ProvisionRequest{
 		UserID: "hv2-u4", SubscriptionID: "sub-hv2-4", PlanTier: "basic", Region: "ap-northeast-1", OwnerKey: key,
+		UserInitiated: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -149,5 +152,20 @@ func TestProvision_OwnerKeyCreatesV2AndForwardsKey(t *testing.T) {
 	pool.QueryRow(context.Background(), `SELECT row_to_json(h)::text FROM fulfillment.hosting_provisions h WHERE id=$1`, resp.ResourceID).Scan(&row)
 	if strings.Contains(row, strings.Fields(key)[1]) {
 		t.Fatal("owner key persisted")
+	}
+}
+
+func TestProvision_DeferredUserRenewalDoesNotAutoCreate(t *testing.T) {
+	pool := hv2Pool(t)
+	s := hv2Service(pool, "") // 自动建机会 panic
+	ctx := context.Background()
+	// 购买(新版 App,带标记)
+	if r, err := s.Provision(ctx, &models.ProvisionRequest{UserID: "hv2-u5", SubscriptionID: "sub5", PlanTier: "basic", DeferProvision: true}); err != nil || r.Status != "awaiting_setup" {
+		t.Fatalf("purchase: %+v %v", r, err)
+	}
+	// 续费(Apple 服务器通知,不带标记):仍不建机
+	r, err := s.Provision(ctx, &models.ProvisionRequest{UserID: "hv2-u5", SubscriptionID: "sub5", PlanTier: "basic"})
+	if err != nil || r.Status != "awaiting_setup" {
+		t.Fatalf("renewal: %+v %v", r, err)
 	}
 }

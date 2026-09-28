@@ -4,3 +4,11 @@
 ALTER TABLE fulfillment.hosting_provisions
     ADD COLUMN IF NOT EXISTS node_kind VARCHAR(16) NOT NULL DEFAULT 'hosted_legacy',
     ADD COLUMN IF NOT EXISTS needs_rebuild BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- 新版 App 购买时选择了延迟开通的用户。续费/升级/账号迁移等自动开通事件不带 defer_provision,
+-- 靠这张表跟随用户的选择,避免给新版 App 用户自动开出老式机。用户自己调 POST /my/node 不受影响。
+CREATE TABLE IF NOT EXISTS fulfillment.hosting_setup_deferred (
+    user_id         VARCHAR(64) PRIMARY KEY,
+    subscription_id VARCHAR(64),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

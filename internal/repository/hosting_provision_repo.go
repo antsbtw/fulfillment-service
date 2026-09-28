@@ -270,3 +270,22 @@ func (r *HostingProvisionRepository) MarkNeedsRebuild(ctx context.Context, id st
 	}
 	return nil
 }
+
+// MarkSetupDeferred 记录该用户选择了延迟开通(新版 App 购买)。
+func (r *HostingProvisionRepository) MarkSetupDeferred(ctx context.Context, userID, subscriptionID string) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO fulfillment.hosting_setup_deferred (user_id, subscription_id) VALUES ($1, NULLIF($2, ''))
+		ON CONFLICT (user_id) DO UPDATE SET subscription_id = EXCLUDED.subscription_id, created_at = NOW()`,
+		userID, subscriptionID)
+	if err != nil {
+		return fmt.Errorf("mark setup deferred: %w", err)
+	}
+	return nil
+}
+
+// IsSetupDeferred 该用户是否选择过延迟开通。
+func (r *HostingProvisionRepository) IsSetupDeferred(ctx context.Context, userID string) (bool, error) {
+	var ok bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM fulfillment.hosting_setup_deferred WHERE user_id = $1)`, userID).Scan(&ok)
+	return ok, err
+}

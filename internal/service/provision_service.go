@@ -63,10 +63,26 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 	}
 
 	// Check if user already has an active hosting node
+	// 延迟开通:本次请求带标记(新版 App 购买),或该用户以前选过(续费/升级/迁移等自动事件不带标记)。
+	// 用户在 App 里主动建机(POST /my/node)不受约束。
+	deferred := false
+	if !req.UserInitiated {
+		if req.DeferProvision {
+			if err := s.hostingRepo.MarkSetupDeferred(ctx, req.UserID, req.SubscriptionID); err != nil {
+				return nil, err
+			}
+			deferred = true
+		} else if d, err := s.hostingRepo.IsSetupDeferred(ctx, req.UserID); err != nil {
+			return nil, err
+		} else {
+			deferred = d
+		}
+	}
+
 	existing, err := s.hostingRepo.GetActiveByUser(ctx, req.UserID)
 	if err == nil && existing != nil {
 		tierChanged := existing.PlanTier != "" && req.PlanTier != "" && existing.PlanTier != req.PlanTier
-		if tierChanged && (existing.IsHostedV2() || req.DeferProvision) {
+		if tierChanged && (existing.IsHostedV2() || deferred) {
 			// 新式机(或新版 App 的购买)换套餐:不自动删了重建出一台老式机,
 			// 打标记由 App 引导用户删除重建(回执 R-12 ③)。机器照常可用。
 			log.Printf("[Provision] Plan tier changed for user=%s: %s -> %s, node kind=%s → needs_rebuild",
@@ -139,8 +155,8 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 	}
 
 	// 新版 App 购买:订阅照常生效,不自动建机,等 App 带 owner key 调 POST /my/node(回执 R-12 ③)。
-	if req.DeferProvision {
-		log.Printf("[Provision] defer_provision for user=%s subscription=%s — waiting for POST /my/node", req.UserID, req.SubscriptionID)
+	if deferred {
+		log.Printf("[Provision] provisioning deferred for user=%s subscription=%s — waiting for POST /my/node", req.UserID, req.SubscriptionID)
 		return &models.ProvisionResponse{
 			Status:  "awaiting_setup",
 			Message: "Provisioning deferred until the App creates the node",
@@ -881,6 +897,7 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, o
 		Region:         region,
 		TrafficLimit:   s.getTrafficLimit(subStatus.PlanTier),
 		OwnerKey:       ownerKey,
+		UserInitiated:  true,
 	}
 
 	resp, err := s.Provision(ctx, provisionReq)

@@ -51,6 +51,8 @@ type ProvisionRequest struct {
 	DeferProvision bool `json:"defer_provision,omitempty"`
 	// OwnerKey 仅 POST /my/node 内部使用,★不入库、不写日志、不接受外部 JSON。
 	OwnerKey string `json:"-"`
+	// UserInitiated 仅 POST /my/node 内部使用:用户在 App 里主动建机,不受"延迟开通"约束。
+	UserInitiated bool `json:"-"`
 }
 
 // ProvisionResponse is returned after starting provisioning
