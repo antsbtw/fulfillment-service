@@ -38,6 +38,7 @@ type CreateNodeRequest struct {
 	UserID          string `json:"user_id,omitempty"`           // 用户 ID（hosting-service 要求 fulfillment 必填）
 	SourceRequestID string `json:"source_request_id,omitempty"` // fulfillment.hosting_provisions.id, hosting 用于打 ProvisionID tag
 	TrafficLimit    int64  `json:"traffic_limit,omitempty"`     // OBox plan traffic limit in bytes
+	OwnerKey        string `json:"owner_key,omitempty"`         // 新式托管机:设备公钥,hosting 写进启动脚本(不入库)
 }
 
 // CreateNodeResponse is the response from creating a node

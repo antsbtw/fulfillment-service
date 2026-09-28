@@ -65,7 +65,22 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 	// Check if user already has an active hosting node
 	existing, err := s.hostingRepo.GetActiveByUser(ctx, req.UserID)
 	if err == nil && existing != nil {
-		if existing.PlanTier != "" && req.PlanTier != "" && existing.PlanTier != req.PlanTier {
+		tierChanged := existing.PlanTier != "" && req.PlanTier != "" && existing.PlanTier != req.PlanTier
+		if tierChanged && (existing.IsHostedV2() || req.DeferProvision) {
+			// 新式机(或新版 App 的购买)换套餐:不自动删了重建出一台老式机,
+			// 打标记由 App 引导用户删除重建(回执 R-12 ③)。机器照常可用。
+			log.Printf("[Provision] Plan tier changed for user=%s: %s -> %s, node kind=%s → needs_rebuild",
+				req.UserID, existing.PlanTier, req.PlanTier, existing.NodeKindOrLegacy())
+			if err := s.hostingRepo.MarkNeedsRebuild(ctx, existing.ID); err != nil {
+				return nil, err
+			}
+			return &models.ProvisionResponse{
+				ResourceID: existing.ID,
+				Status:     existing.Status,
+				Message:    "Plan changed; node marked needs_rebuild",
+			}, nil
+		}
+		if tierChanged {
 			log.Printf("[Provision] Plan tier changed for user=%s: %s -> %s, rebuilding node", req.UserID, existing.PlanTier, req.PlanTier)
 			if existing.HostingNodeID != "" {
 				if _, err := s.hostingClient.DeleteNode(ctx, existing.HostingNodeID); err != nil {
@@ -123,6 +138,15 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		}
 	}
 
+	// 新版 App 购买:订阅照常生效,不自动建机,等 App 带 owner key 调 POST /my/node(回执 R-12 ③)。
+	if req.DeferProvision {
+		log.Printf("[Provision] defer_provision for user=%s subscription=%s — waiting for POST /my/node", req.UserID, req.SubscriptionID)
+		return &models.ProvisionResponse{
+			Status:  "awaiting_setup",
+			Message: "Provisioning deferred until the App creates the node",
+		}, nil
+	}
+
 	// Create hosting provision record
 	provisionID := uuid.New().String()
 	hp := &models.HostingProvision{
@@ -135,6 +159,10 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 		Status:         models.StatusPending,
 		PlanTier:       req.PlanTier,
 		TrafficLimit:   trafficLimit,
+		NodeKind:       models.NodeKindHostedLegacy,
+	}
+	if req.OwnerKey != "" {
+		hp.NodeKind = models.NodeKindHostedV2
 	}
 
 	if err := s.hostingRepo.Create(ctx, hp); err != nil {
@@ -183,6 +211,7 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 		UserID:          req.UserID,
 		SourceRequestID: provisionID,
 		TrafficLimit:    req.TrafficLimit,
+		OwnerKey:        req.OwnerKey, // 只经内存转交 hosting 写进启动脚本,不入库
 	}
 
 	createResp, err := s.hostingClient.CreateNode(ctx, createReq)
@@ -676,6 +705,15 @@ func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID string)
 		TrafficPercent: trafficPercent,
 		CreatedAt:      hp.CreatedAt.Format(time.RFC3339),
 	}
+	resp.Node.NodeKind = hp.NodeKindOrLegacy()
+	resp.Node.NodeID = hp.HostingNodeID
+	resp.Node.NeedsRebuild = hp.NeedsRebuild
+	if hp.IsHostedV2() {
+		// 新式机的连接参数来自机器上的配方(App 经隧道读取),这里不给
+		resp.Node.APIPort, resp.Node.APIKey = 0, nil
+		resp.Node.VlessPort, resp.Node.SSPort = 0, 0
+		resp.Node.PublicKey, resp.Node.ShortID = nil, nil
+	}
 
 	switch hp.Status {
 	case models.StatusPending, models.StatusCreating, models.StatusRunning, models.StatusInstalling:
@@ -767,8 +805,21 @@ func (s *ProvisionService) GetAvailableRegions(ctx context.Context) (*models.Reg
 }
 
 // CreateUserNode creates a node for a user after verifying subscription
-func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region string) (*models.CreateNodeResponse, error) {
-	log.Printf("[CreateUserNode] Creating node for user=%s, region=%s", userID, region)
+func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, ownerKey string) (*models.CreateNodeResponse, error) {
+	log.Printf("[CreateUserNode] Creating node for user=%s, region=%s, owner_key=%v", userID, region, ownerKey != "")
+
+	nodeKind := models.NodeKindHostedLegacy
+	if ownerKey != "" {
+		k, err := NormalizeOwnerKey(ownerKey)
+		if err != nil {
+			return &models.CreateNodeResponse{
+				Success: false,
+				Status:  "invalid_owner_key",
+				Message: "设备钥匙格式不正确,请更新 App 后重试",
+			}, nil
+		}
+		ownerKey, nodeKind = k, models.NodeKindHostedV2
+	}
 
 	subStatus, err := s.subscriptionClient.GetUserHostingSubscription(ctx, userID)
 	if err != nil {
@@ -829,6 +880,7 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 		PlanTier:       subStatus.PlanTier,
 		Region:         region,
 		TrafficLimit:   s.getTrafficLimit(subStatus.PlanTier),
+		OwnerKey:       ownerKey,
 	}
 
 	resp, err := s.Provision(ctx, provisionReq)
@@ -844,6 +896,7 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region st
 		Success:          true,
 		ResourceID:       resp.ResourceID,
 		Status:           "creating",
+		NodeKind:         nodeKind,
 		CreationProgress: s.buildCreationProgress(models.StatusPending),
 		Message:          "Node creation started. This may take a few minutes.",
 	}, nil

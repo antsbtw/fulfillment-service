@@ -327,7 +327,7 @@ func (h *Handler) CreateMyNode(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.provisionService.CreateUserNode(c.Request.Context(), userID.(string), req.Region)
+	resp, err := h.provisionService.CreateUserNode(c.Request.Context(), userID.(string), req.Region, req.OwnerKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

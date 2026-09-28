@@ -26,19 +26,19 @@ func (r *HostingProvisionRepository) Create(ctx context.Context, hp *models.Host
 			id, subscription_id, user_id, channel,
 			hosting_node_id, provider, region,
 			public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup
+			status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7,
 			$8, $9, $10, $11, $12, $13, $14,
-			$15, $16, $17, $18, $19, $20
+			$15, $16, $17, $18, $19, $20, $21
 		)
 	`
 	_, err := r.pool.Exec(ctx, query,
 		hp.ID, hp.SubscriptionID, hp.UserID, hp.Channel,
 		hp.HostingNodeID, hp.Provider, hp.Region,
 		hp.PublicIP, hp.APIPort, hp.APIKey, hp.VlessPort, hp.SSPort, hp.PublicKey, hp.ShortID,
-		hp.Status, hp.ErrorMessage, hp.PlanTier, hp.TrafficLimit, hp.TrafficUsed, hp.NeedsCleanup,
+		hp.Status, hp.ErrorMessage, hp.PlanTier, hp.TrafficLimit, hp.TrafficUsed, hp.NeedsCleanup, hp.NodeKindOrLegacy(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert hosting_provision: %w", err)
@@ -51,7 +51,7 @@ func (r *HostingProvisionRepository) GetByID(ctx context.Context, id string) (*m
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind, needs_rebuild,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE id = $1
@@ -64,7 +64,7 @@ func (r *HostingProvisionRepository) GetBySubscriptionID(ctx context.Context, su
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind, needs_rebuild,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE subscription_id = $1 AND deleted_at IS NULL
@@ -83,7 +83,7 @@ func (r *HostingProvisionRepository) GetActiveByUser(ctx context.Context, userID
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind, needs_rebuild,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE user_id = $1
@@ -100,7 +100,7 @@ func (r *HostingProvisionRepository) GetLatestByUser(ctx context.Context, userID
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind, needs_rebuild,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE user_id = $1
@@ -194,7 +194,7 @@ func (r *HostingProvisionRepository) ListNeedsCleanup(ctx context.Context, limit
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind, needs_rebuild,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE needs_cleanup = TRUE
@@ -215,7 +215,7 @@ func (r *HostingProvisionRepository) GetByHostingNodeID(ctx context.Context, hos
 		SELECT id, subscription_id, user_id, channel,
 			   hosting_node_id, provider, region,
 			   public_ip, api_port, api_key, vless_port, ss_port, public_key, short_id,
-			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup,
+			   status, error_message, plan_tier, traffic_limit, traffic_used, needs_cleanup, node_kind, needs_rebuild,
 			   created_at, updated_at, ready_at, deleted_at
 		FROM fulfillment.hosting_provisions
 		WHERE hosting_node_id = $1
@@ -231,7 +231,7 @@ func (r *HostingProvisionRepository) scanOne(row pgx.Row) (*models.HostingProvis
 		&hp.ID, &hp.SubscriptionID, &hp.UserID, &hp.Channel,
 		&hp.HostingNodeID, &hp.Provider, &hp.Region,
 		&hp.PublicIP, &hp.APIPort, &hp.APIKey, &hp.VlessPort, &hp.SSPort, &hp.PublicKey, &hp.ShortID,
-		&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed, &hp.NeedsCleanup,
+		&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed, &hp.NeedsCleanup, &hp.NodeKind, &hp.NeedsRebuild,
 		&hp.CreatedAt, &hp.UpdatedAt, &hp.ReadyAt, &hp.DeletedAt,
 	)
 	if err != nil {
@@ -251,7 +251,7 @@ func (r *HostingProvisionRepository) scanMany(rows pgx.Rows) ([]*models.HostingP
 			&hp.ID, &hp.SubscriptionID, &hp.UserID, &hp.Channel,
 			&hp.HostingNodeID, &hp.Provider, &hp.Region,
 			&hp.PublicIP, &hp.APIPort, &hp.APIKey, &hp.VlessPort, &hp.SSPort, &hp.PublicKey, &hp.ShortID,
-			&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed, &hp.NeedsCleanup,
+			&hp.Status, &hp.ErrorMessage, &hp.PlanTier, &hp.TrafficLimit, &hp.TrafficUsed, &hp.NeedsCleanup, &hp.NodeKind, &hp.NeedsRebuild,
 			&hp.CreatedAt, &hp.UpdatedAt, &hp.ReadyAt, &hp.DeletedAt,
 		)
 		if err != nil {
@@ -260,4 +260,13 @@ func (r *HostingProvisionRepository) scanMany(rows pgx.Rows) ([]*models.HostingP
 		results = append(results, hp)
 	}
 	return results, rows.Err()
+}
+
+// MarkNeedsRebuild 换套餐时新式机不自动重建,打标记由 App 引导用户删除重建(回执 R-12 ③)。
+func (r *HostingProvisionRepository) MarkNeedsRebuild(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE fulfillment.hosting_provisions SET needs_rebuild = TRUE, updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("mark needs_rebuild: %w", err)
+	}
+	return nil
 }

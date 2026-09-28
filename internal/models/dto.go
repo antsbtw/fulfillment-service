@@ -45,6 +45,12 @@ type ProvisionRequest struct {
 
 	// Trial-specific
 	DeviceID string `json:"device_id,omitempty"`
+
+	// 托管机(回执 R-12):
+	// DeferProvision 新版 App 购买时带 → 订阅照常生效但不自动建机,等 App 调 POST /my/node。
+	DeferProvision bool `json:"defer_provision,omitempty"`
+	// OwnerKey 仅 POST /my/node 内部使用,★不入库、不写日志、不接受外部 JSON。
+	OwnerKey string `json:"-"`
 }
 
 // ProvisionResponse is returned after starting provisioning
@@ -186,6 +192,11 @@ type UserNodeInfo struct {
 	TrafficUsedGB  float64 `json:"traffic_used_gb"`
 	TrafficPercent float64 `json:"traffic_percent"`
 	CreatedAt      string  `json:"created_at"`
+
+	// 回执 R-12 ②:机器类型与 hosting 节点 id(防火墙等 /obox/nodes/{node_id}/… 接口用)
+	NodeKind     string `json:"node_kind"`
+	NodeID       string `json:"node_id,omitempty"`
+	NeedsRebuild bool   `json:"needs_rebuild"`
 }
 
 // RegionListResponse is the list of available regions
@@ -204,6 +215,8 @@ type RegionInfo struct {
 // CreateNodeRequest is for user-initiated node creation
 type CreateNodeRequest struct {
 	Region string `json:"region" binding:"required"`
+	// OwnerKey 新版 App 带设备公钥 → 新式托管机;缺省 → 老式(老 App 兼容)。
+	OwnerKey string `json:"owner_key,omitempty"`
 }
 
 // RecreateNodeRequest is for user-initiated node recreation
@@ -222,6 +235,7 @@ type CreateNodeResponse struct {
 	Success          bool                  `json:"success"`
 	ResourceID       string                `json:"resource_id,omitempty"`
 	Status           string                `json:"status"` // creating, failed
+	NodeKind         string                `json:"node_kind,omitempty"` // hosted_v2 / hosted_legacy
 	CreationProgress *NodeCreationProgress `json:"creation_progress,omitempty"`
 	Message          string                `json:"message"`
 }
