@@ -650,11 +650,12 @@ func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID string)
 		regionName = region.Name
 	}
 
-	trafficLimitGB := float64(hp.TrafficLimit) / (1024 * 1024 * 1024)
-	trafficUsedGB := float64(hp.TrafficUsed) / (1024 * 1024 * 1024)
+	trafficUsed, trafficLimit := s.liveTraffic(ctx, hp)
+	trafficLimitGB := float64(trafficLimit) / (1024 * 1024 * 1024)
+	trafficUsedGB := float64(trafficUsed) / (1024 * 1024 * 1024)
 	trafficPercent := 0.0
-	if hp.TrafficLimit > 0 {
-		trafficPercent = (float64(hp.TrafficUsed) / float64(hp.TrafficLimit)) * 100
+	if trafficLimit > 0 {
+		trafficPercent = (float64(trafficUsed) / float64(trafficLimit)) * 100
 	}
 
 	resp.Node = &models.UserNodeInfo{
@@ -1016,4 +1017,27 @@ func (s *ProvisionService) cleanupFailedProvision(ctx context.Context, hp *model
 
 	log.Printf("[cleanupFailedProvision] Successfully cleaned up failed provision: %s", hp.ID)
 	return nil
+}
+
+// liveTraffic 返回节点的真实用量与上限(bytes)。
+//
+// 真源是 hosting-service 的 AWS 读数;本库 hosting_provisions.traffic_used 无写入方、恒为 0。
+// hosting 不可达时退回本库的值,不让状态接口因此失败。
+func (s *ProvisionService) liveTraffic(ctx context.Context, hp *models.HostingProvision) (used, limit int64) {
+	used, limit = hp.TrafficUsed, hp.TrafficLimit
+	if hp.HostingNodeID == "" || s.hostingClient == nil {
+		return used, limit
+	}
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	t, err := s.hostingClient.GetNodeTraffic(tctx, hp.HostingNodeID)
+	if err != nil {
+		log.Printf("[GetUserNodeStatus] live traffic unavailable for node %s: %v", hp.HostingNodeID, err)
+		return used, limit
+	}
+	used = t.TrafficUsed
+	if t.TrafficLimit > 0 {
+		limit = t.TrafficLimit
+	}
+	return used, limit
 }

@@ -333,3 +333,38 @@ func (c *HostingClient) WaitForNodeReady(ctx context.Context, nodeID string, max
 
 	return nil, fmt.Errorf("timeout waiting for node to be ready")
 }
+
+// NodeTraffic 是 hosting-service 按 AWS 读数记的节点用量(bytes,上下行合计)。
+type NodeTraffic struct {
+	NodeID       string `json:"node_id"`
+	TrafficLimit int64  `json:"traffic_limit"`
+	TrafficUsed  int64  `json:"traffic_used"`
+	Status       string `json:"status"`
+}
+
+// GetNodeTraffic 读 hosting 的真实用量。
+//
+// fulfillment 自己的 hosting_provisions.traffic_used 没有任何写入方(恒 0),
+// App 看到的用量必须以 hosting 的读数为准(回执 X-1)。
+func (c *HostingClient) GetNodeTraffic(ctx context.Context, nodeID string) (*NodeTraffic, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/admin/nodes/"+nodeID+"/traffic", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-Admin-Key", c.adminKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hosting-service returned status %d", resp.StatusCode)
+	}
+	var result NodeTraffic
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &result, nil
+}
