@@ -22,6 +22,7 @@ type ProvisionService struct {
 	hostingClient      *client.HostingClient
 	subscriptionClient *client.SubscriptionClient
 	oboxClient         *client.OBoxClient
+	regions            *RegionCatalog
 }
 
 // NewProvisionService creates a new provision service
@@ -34,7 +35,12 @@ func NewProvisionService(
 	subscriptionClient *client.SubscriptionClient,
 	oboxClient *client.OBoxClient,
 ) *ProvisionService {
+	var lister regionLister
+	if hostingClient != nil {
+		lister = hostingClient
+	}
 	return &ProvisionService{
+		regions:            NewRegionCatalog(cfg, lister, regionRepo),
 		cfg:                cfg,
 		hostingRepo:        hostingRepo,
 		regionRepo:         regionRepo,
@@ -690,9 +696,10 @@ func (s *ProvisionService) GetUserNodeStatus(ctx context.Context, userID string)
 	resp.HasNode = true
 
 	regionName := hp.Region
-	region, err := s.regionRepo.GetByCode(ctx, hp.Region)
-	if err == nil && region != nil {
-		regionName = region.Name
+	if r, err := s.regionRepo.GetByCode(ctx, hp.Region); err == nil && r != nil {
+		regionName = r.Name
+	} else if r, _ := s.regions.Lookup(ctx, hp.Region); r != nil {
+		regionName = r.Name
 	}
 
 	trafficUsed, trafficLimit := s.liveTraffic(ctx, hp)
@@ -800,24 +807,13 @@ func (s *ProvisionService) buildCreationProgress(status string) *models.NodeCrea
 	}
 }
 
-// GetAvailableRegions gets available regions
+// GetAvailableRegions 托管区域列表:Lightsail 实际区域 − 运营 deny 名单,available 如实反映能否开机。
 func (s *ProvisionService) GetAvailableRegions(ctx context.Context) (*models.RegionListResponse, error) {
-	regions, err := s.regionRepo.GetAvailable(ctx)
+	regions, err := s.regions.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	var regionInfos []models.RegionInfo
-	for _, r := range regions {
-		regionInfos = append(regionInfos, models.RegionInfo{
-			Code:      r.Code,
-			Name:      r.Name,
-			Provider:  r.Provider,
-			Available: r.Available,
-		})
-	}
-
-	return &models.RegionListResponse{Regions: regionInfos}, nil
+	return &models.RegionListResponse{Regions: regions}, nil
 }
 
 // CreateUserNode creates a node for a user after verifying subscription
@@ -835,6 +831,14 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, o
 			}, nil
 		}
 		ownerKey, nodeKind = k, models.NodeKindHostedV2
+	}
+
+	// 区域校验与 /public/regions 同一份列表:不在列表 → invalid_region;暂不可开机 → region_unavailable。
+	// 空 region 沿用默认区域(老客户端)。
+	if region != "" {
+		if resp := s.checkRegion(ctx, region); resp != nil {
+			return resp, nil
+		}
 	}
 
 	subStatus, err := s.subscriptionClient.GetUserHostingSubscription(ctx, userID)
@@ -917,6 +921,30 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, o
 		CreationProgress: s.buildCreationProgress(models.StatusPending),
 		Message:          "Node creation started. This may take a few minutes.",
 	}, nil
+}
+
+// checkRegion 返回 nil 表示可以在该区域建机。
+func (s *ProvisionService) checkRegion(ctx context.Context, region string) *models.CreateNodeResponse {
+	r, err := s.regions.Lookup(ctx, region)
+	if err != nil {
+		log.Printf("[CreateUserNode] region list unavailable, not blocking region=%s: %v", region, err)
+		return nil
+	}
+	if r == nil {
+		return &models.CreateNodeResponse{
+			Success: false,
+			Status:  "invalid_region",
+			Message: fmt.Sprintf("Region %q is not available for hosting. Please choose another region.", region),
+		}
+	}
+	if !r.Available {
+		return &models.CreateNodeResponse{
+			Success: false,
+			Status:  "region_unavailable",
+			Message: fmt.Sprintf("%s is temporarily unavailable for new servers. Please choose another region or try again later.", r.Name),
+		}
+	}
+	return nil
 }
 
 // DeleteUserNode deletes a user's node

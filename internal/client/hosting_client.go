@@ -369,3 +369,37 @@ func (c *HostingClient) GetNodeTraffic(ctx context.Context, nodeID string) (*Nod
 	}
 	return &result, nil
 }
+
+// CloudRegion 托管账号在某 Lightsail 区域的开机能力(hosting 已缓存 AWS 结果 1h)。
+type CloudRegion struct {
+	Code              string `json:"code"`
+	Name              string `json:"name"` // Lightsail displayName,如 "Tokyo"
+	Available         bool   `json:"available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+}
+
+// ListCloudRegions 取 hosting 的区域目录(未过运营名单)。
+func (c *HostingClient) ListCloudRegions(ctx context.Context) ([]CloudRegion, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/admin/cloud/regions", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-Admin-Key", c.adminKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hosting-service returned status %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Regions []CloudRegion `json:"regions"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return result.Regions, nil
+}

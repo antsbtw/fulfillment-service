@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -96,6 +97,10 @@ type HostingConfig struct {
 	AdminKey      string
 	CloudProvider string
 	DefaultRegion string
+	// 托管区域运营名单(区域目录真源是 hosting 的 Lightsail GetRegions,这里只过滤/排序)。
+	// 不在 RegionDeny 里的区域默认开放;RegionOrder 之外的区域按 code 排在后面。
+	RegionDeny  []string
+	RegionOrder []string
 }
 
 type NodeConfig struct {
@@ -141,6 +146,8 @@ func Load() *Config {
 			AdminKey:      getEnv("HOSTING_ADMIN_KEY", ""),
 			CloudProvider: getEnv("HOSTING_CLOUD_PROVIDER", "lightsail"),
 			DefaultRegion: getEnv("HOSTING_DEFAULT_REGION", "us-east-1"),
+			RegionDeny:    getEnvList("HOSTING_REGION_DENY", DefaultHostingRegionDeny),
+			RegionOrder:   getEnvList("HOSTING_REGION_ORDER", DefaultHostingRegionOrder),
 		},
 		Node: NodeConfig{
 			APIPort:   getEnvInt("NODE_API_PORT", 8080),
@@ -214,6 +221,24 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// getEnvList 逗号分隔;设为 "-" 表示显式清空。
+func getEnvList(key string, defaultValue []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return defaultValue
+	}
+	if strings.TrimSpace(v) == "-" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getEnvInt(key string, defaultValue int) int {
