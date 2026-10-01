@@ -831,6 +831,11 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, o
 			}, nil
 		}
 		ownerKey, nodeKind = k, models.NodeKindHostedV2
+		if !s.hostedV2Allowed(ctx, userID) {
+			// 托管闸门未钉住且不是测试账号:忽略 owner_key,按老式开(1.3.6 方式,预装)。
+			// App 按返回的 node_kind 分流,无需改动(CLIENT_REQUEST_HOSTED_V2_GATE_2026-09-30)。
+			ownerKey, nodeKind = "", models.NodeKindHostedLegacy
+		}
 	}
 
 	// 区域校验与 /public/regions 同一份列表:不在列表 → invalid_region;暂不可开机 → region_unavailable。
@@ -921,6 +926,26 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, o
 		CreationProgress: s.buildCreationProgress(models.StatusPending),
 		Message:          "Node creation started. This may take a few minutes.",
 	}, nil
+}
+
+// hostedV2Allowed 新式托管机是否对该账号开放。判据在 hosting-service(钉住的 agent 版本 ≥ v1.15.0,或测试白名单)。
+// 查询失败一律按不允许:宁可开老式机,也不在闸门上线前开出能执行配方的新式机。
+func (s *ProvisionService) hostedV2Allowed(ctx context.Context, userID string) bool {
+	if s.hostingClient == nil {
+		return false
+	}
+	// 共用的 hosting 客户端超时 60s;开关查询只给 5s,超时同样按不允许
+	gctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	allowed, reason, err := s.hostingClient.HostedV2Allowed(gctx, userID)
+	if err != nil {
+		log.Printf("[CreateUserNode] hosted_v2 gate check failed for user=%s, falling back to hosted_legacy: %v", userID, err)
+		return false
+	}
+	if !allowed {
+		log.Printf("[CreateUserNode] hosted_v2 not open for user=%s (%s), creating hosted_legacy", userID, reason)
+	}
+	return allowed
 }
 
 // checkRegion 返回 nil 表示可以在该区域建机。

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -402,4 +403,31 @@ func (c *HostingClient) ListCloudRegions(ctx context.Context) ([]CloudRegion, er
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return result.Regions, nil
+}
+
+// HostedV2Allowed 问 hosting-service 能否给该账号开新式托管机(托管闸门 agent ≥ v1.15.0 钉住前只开放测试白名单)。
+func (c *HostingClient) HostedV2Allowed(ctx context.Context, userID string) (bool, string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET",
+		c.baseURL+"/api/admin/obox/hosted-v2-allowed?user_id="+url.QueryEscape(userID), nil)
+	if err != nil {
+		return false, "", fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-Admin-Key", c.adminKey)
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return false, "", fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return false, "", fmt.Errorf("hosting-service returned status %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Allowed bool   `json:"allowed"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, "", fmt.Errorf("decode response: %w", err)
+	}
+	return result.Allowed, result.Reason, nil
 }
