@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/client"
@@ -49,6 +50,15 @@ func (s *CleanupScheduler) Start(ctx context.Context) {
 			s.runCleanupCycle(ctx)
 		}
 	}
+}
+
+// hostedNodePrefix 是 hosting-service 给托管机(hosted / hosted_v2)起的 node_id 前缀(naming.go)。
+// 用户自建机走 token 接入,node_id 是 "byo-",没有 hosting_provision,也不该被这里清理。
+const hostedNodePrefix = "obox-"
+
+// isHostedNode 只有我方代建的托管机才归 CleanupScheduler 对账。
+func isHostedNode(nodeID string) bool {
+	return strings.HasPrefix(nodeID, hostedNodePrefix)
 }
 
 // runCleanupCycle 执行一轮清理
@@ -121,6 +131,9 @@ func (s *CleanupScheduler) cleanupOrphanedActiveNodes(ctx context.Context) {
 
 	orphanCount := 0
 	for _, node := range nodes {
+		if !isHostedNode(node.NodeID) {
+			continue // 用户自建机(token 接入)不归 fulfillment 管
+		}
 		provision, _ := s.hostingRepo.GetByHostingNodeID(ctx, node.NodeID)
 		if provision != nil && (provision.Status == "active" || provision.Status == "creating" || provision.Status == "pending" || provision.Status == "running" || provision.Status == "installing") {
 			continue // 有活跃的 provision 对应，正常
@@ -168,6 +181,9 @@ func (s *CleanupScheduler) cleanupOrphanedNodes(ctx context.Context) {
 	log.Printf("[CleanupScheduler] Found %d failed nodes older than %v in hosting-service", len(nodes), s.failedNodeAge)
 
 	for _, node := range nodes {
+		if !isHostedNode(node.NodeID) {
+			continue // 用户自建机(token 接入)不归 fulfillment 管
+		}
 		// 检查 fulfillment 中是否有活跃的 provision 引用此节点
 		provision, _ := s.hostingRepo.GetByHostingNodeID(ctx, node.NodeID)
 		if provision != nil && provision.Status == "active" {
