@@ -278,6 +278,24 @@ func (s *VPNService) provisionViaEntitlement(ctx context.Context, req *models.Pr
 	}, nil
 }
 
+// platformReplaySlack 是判"同一期重放"的余量：开通时 expire 按 now+30d 写，与 Apple/Google 的 period_end
+// 实测差 0–2 天；真续期的 period_end 比现有到期晚约一个周期（≥28 天），7 天足以区分两者。
+const platformReplaySlack = 7 * 24 * time.Hour
+
+// isPlatformPeriodReplay 判断本次 apple/google 订阅请求是否是已开通周期的重放（而非续期）：
+// period_end 没有超出现有到期 + 余量。没有 period_end 或现有到期时不认定为重放（保持旧行为）。
+func isPlatformPeriodReplay(req *models.ProvisionRequest, existing *models.VPNProvision) bool {
+	if req.PeriodEnd == nil || existing == nil || existing.ExpireAt == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Channel)) {
+	case "apple", "google":
+	default:
+		return false
+	}
+	return !req.PeriodEnd.After(existing.ExpireAt.Add(platformReplaySlack))
+}
+
 // provisionVPNUserLegacy 是开关 false（及 trial）沿用的旧路径，逐字节不动。
 
 func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
@@ -312,6 +330,23 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 			// 容差 1 分钟，避免“同一秒重复回放”因纳秒级差异被误判为延长而反复下发。
 			extendsExpiry := existingBySubID.ExpireAt == nil ||
 				prospectiveExpireAt.After(existingBySubID.ExpireAt.Add(time.Minute))
+
+			// ★平台订阅同一期重放（2026-10-15 link19900511 案）：App 恢复购买会让 payment 对已验证交易
+			// 重发 created 事件，下面 apple/google 按 fresh period 算出 now+30d，必然"延长"，于是每点一次
+			// 就清零已用流量、到期顺延 30 天。真续期的 period_end 一定比现有到期晚一个周期；
+			// period_end 没超出现有到期（留余量）= 这一期已开通过 = 重放。流量上限变了（同 tier 换档）照旧放行。
+			if tierUnchanged && extendsExpiry &&
+				existingBySubID.TrafficLimit == s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit) &&
+				isPlatformPeriodReplay(req, existingBySubID) {
+				log.Printf("[VPNService] Platform subscription period already applied for subscription=%s (provision=%s, channel=%s, period_end=%s), replay — skipping (no expiry extension / no traffic reset)",
+					req.SubscriptionID, existingBySubID.ID, req.Channel, req.PeriodEnd.UTC().Format(time.RFC3339))
+				return &models.ProvisionResponse{
+					ResourceID: existingBySubID.ID,
+					Status:     models.StatusActive,
+					VPNUserID:  *existingBySubID.OtunUUID,
+					Message:    "Already provisioned (idempotent)",
+				}, nil
+			}
 
 			if tierUnchanged && !extendsExpiry {
 				log.Printf("[VPNService] Already provisioned for subscription=%s (provision=%s), same tier & no expiry extension, skipping",
