@@ -43,6 +43,9 @@ func main() {
 		log.Fatalf("Failed to ensure campaign schema (migration 010): %v", err)
 	}
 	log.Println("vpn_provisions.product_face / campaign_grants schema ensured (migration 010)")
+	if err := db.EnsureRefundRevocationSchema(context.Background(), pool); err != nil {
+		log.Fatalf("Failed to ensure refund revocation schema: %v", err)
+	}
 
 	// Initialize repositories
 	hostingRepo := repository.NewHostingProvisionRepository(pool)
@@ -97,6 +100,8 @@ func main() {
 		entitlementProfiles,
 		campaignGrantRepo,
 	)
+	// 服务类订单退款 → 扣减该单天数/流量(ADMIN_REFUND_DESIGN §3.3)
+	vpnService.SetRefundRevocations(repository.NewRefundRevocationRepository(pool))
 
 	entitlementService := service.NewEntitlementService(
 		cfg,

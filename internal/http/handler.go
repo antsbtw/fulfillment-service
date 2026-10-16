@@ -527,6 +527,23 @@ func (h *Handler) RevokeCampaign(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": res})
 }
 
+// RefundRevoke 服务类订单退款:从该用户对应线路扣回这笔订单的天数/流量,减完到期则禁用。
+// POST /api/internal/vpn/user/:user_id/refund-revoke(subscription-service 收到 subscription.refunded 后调用)。
+func (h *Handler) RefundRevoke(c *gin.Context) {
+	var req service.RefundRevokeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	req.UserID = c.Param("user_id")
+	res, err := h.vpnService.RefundRevoke(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": res})
+}
+
 // GetCampaignProfile 活动账号现状 + grant 聚合（campaign-service 叠加闸 / me / preview 读口）。
 // GET /api/internal/vpn/campaign/user/:user_id
 func (h *Handler) GetCampaignProfile(c *gin.Context) {

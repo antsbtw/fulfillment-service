@@ -125,3 +125,26 @@ func EnsureCampaignSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	return nil
 }
+
+// EnsureRefundRevocationSchema 服务类退款停服扣减记录表(按 ref 幂等),启动即幂等确保。
+func EnsureRefundRevocationSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS fulfillment.vpn_refund_revocations (
+		ref VARCHAR(256) PRIMARY KEY,
+		user_id VARCHAR(256) NOT NULL,
+		plan_tier VARCHAR(32) NOT NULL,
+		provision_id VARCHAR(256),
+		days INT NOT NULL DEFAULT 0,
+		traffic_bytes BIGINT NOT NULL DEFAULT 0,
+		old_expire_at TIMESTAMPTZ,
+		new_expire_at TIMESTAMPTZ,
+		new_traffic_limit BIGINT NOT NULL DEFAULT 0,
+		disabled BOOLEAN NOT NULL DEFAULT FALSE,
+		noop BOOLEAN NOT NULL DEFAULT FALSE,
+		reason TEXT,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`)
+	if err != nil {
+		return fmt.Errorf("ensure refund revocation schema: %w", err)
+	}
+	return nil
+}

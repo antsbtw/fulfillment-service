@@ -174,6 +174,7 @@ func (s *Server) setupRoutes() {
 		// ★第三产品面 campaign（document/marketing-campaign/*）：撤销扣减（subscription-service 调）+
 		// 活动账号读口（campaign-service 叠加闸 / me / preview 调）。开通仍走 POST /provision（plan_tier=campaign）。
 		internal.POST("/vpn/campaign/revoke", s.handler.RevokeCampaign)
+		internal.POST("/vpn/user/:user_id/refund-revoke", s.handler.RefundRevoke)
 		internal.GET("/vpn/campaign/user/:user_id", s.handler.GetCampaignProfile)
 
 		// User email update (auth-service → subscription-service → fulfillment-service)

@@ -59,6 +59,8 @@ type VPNService struct {
 	// campaignGrants：第三产品面 campaign 的入账台账（可 nil = 未接线：campaign 开通报错、/vpn/all
 	// campaign 元素不带统计）。见 campaign_service.go。
 	campaignGrants campaignGrantStore
+	// refundRevocations:服务类订单退款停服扣减记录(可 nil = 未接线,RefundRevoke 报错)。
+	refundRevocations refundRevocationStore
 }
 
 // NewVPNService creates a new VPN service
