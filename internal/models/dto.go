@@ -425,6 +425,13 @@ type VPNProtocol struct {
 	Protocol string `json:"-"` // vless, shadowsocks（MarshalJSON 同时写出 protocol + protocol_name）
 	URL      string `json:"url"`
 	Node     string `json:"node"` // primary, backup
+
+	// NodeID 标准面稳定节点标识（otun-manager 08-29 起下发，此前在这里被丢掉）。不透明字符串，
+	// 禁止望文生义推地理。住宅面不填，omitempty 不输出。
+	NodeID string `json:"node_id,omitempty"`
+	// URLV6 basic IPv6 方案 A（otun-manager docs/design/BASIC_NODES_IPV6_DELIVERY_DESIGN.md §11–12）：
+	// 同一条目只把连接地址换成 [v6] 的完整链接，原样透传。只有名单用户的 vless 才有，omitempty 不输出。
+	URLV6 string `json:"url_v6,omitempty"`
 }
 
 // MarshalJSON 同时输出 protocol 与 protocol_name（值相同），兼容前端两套解码结构体。
@@ -436,11 +443,15 @@ func (p VPNProtocol) MarshalJSON() ([]byte, error) {
 		ProtocolName string `json:"protocol_name"`
 		URL          string `json:"url"`
 		Node         string `json:"node"`
+		NodeID       string `json:"node_id,omitempty"`
+		URLV6        string `json:"url_v6,omitempty"`
 	}{
 		Protocol:     p.Protocol,
 		ProtocolName: p.Protocol,
 		URL:          p.URL,
 		Node:         p.Node,
+		NodeID:       p.NodeID,
+		URLV6:        p.URLV6,
 	})
 }
 

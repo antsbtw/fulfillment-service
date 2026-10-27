@@ -1022,6 +1022,8 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 				Protocol: p.Protocol,
 				URL:      p.URL,
 				Node:     p.Node,
+				NodeID:   p.NodeID,
+				URLV6:    p.URLV6,
 			})
 		}
 		expireAt = config.ExpireAt

@@ -23,14 +23,18 @@ import (
 // 返回格式 "v<hex16>"（sha256 前 8 字节），与 otun-manager realm version hash 风格一致。
 func computeConfigVersion(protocols []models.VPNProtocol, smartStrategy json.RawMessage) string {
 	// protocols 稳定投影：只取 {protocol, url, node}，按三元组排序。
+	// url_v6（basic IPv6 方案 A）非空时也纳入：v6 地址下发 / 撤回都要让前端刷新；为空时 omitempty
+	// 不进 payload，名单外用户与改造前逐字节一致、version 不抖动。node_id 不纳：节点不变它就不变，
+	// 纳入只会让全体 basic 用户上线时 version 翻转一次、无谓重连。
 	type stableProto struct {
 		Protocol string `json:"protocol"`
 		URL      string `json:"url"`
 		Node     string `json:"node"`
+		URLV6    string `json:"url_v6,omitempty"`
 	}
 	sp := make([]stableProto, len(protocols))
 	for i, p := range protocols {
-		sp[i] = stableProto{Protocol: p.Protocol, URL: p.URL, Node: p.Node}
+		sp[i] = stableProto{Protocol: p.Protocol, URL: p.URL, Node: p.Node, URLV6: p.URLV6}
 	}
 	sort.Slice(sp, func(i, j int) bool {
 		if sp[i].Node != sp[j].Node {

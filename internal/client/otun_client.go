@@ -158,6 +158,8 @@ type Protocol struct {
 	Protocol string `json:"protocol"`
 	URL      string `json:"url"`
 	Node     string `json:"node"`
+	NodeID   string `json:"node_id,omitempty"` // 标准面稳定节点标识
+	URLV6    string `json:"url_v6,omitempty"`  // basic IPv6 方案 A：只有名单用户的 vless 才有
 }
 
 // setAuthHeader 设置内部服务认证头
