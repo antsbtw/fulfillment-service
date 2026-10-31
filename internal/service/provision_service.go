@@ -234,6 +234,7 @@ func (s *ProvisionService) provisionAsync(provisionID string, req *models.Provis
 		SourceRequestID: provisionID,
 		TrafficLimit:    req.TrafficLimit,
 		OwnerKey:        req.OwnerKey, // 只经内存转交 hosting 写进启动脚本,不入库
+		DisplayName:     req.DisplayName,
 	}
 
 	createResp, err := s.hostingClient.CreateNode(ctx, createReq)
@@ -817,8 +818,17 @@ func (s *ProvisionService) GetAvailableRegions(ctx context.Context) (*models.Reg
 }
 
 // CreateUserNode creates a node for a user after verifying subscription
-func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, ownerKey string) (*models.CreateNodeResponse, error) {
+func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, ownerKey, displayName string) (*models.CreateNodeResponse, error) {
 	log.Printf("[CreateUserNode] Creating node for user=%s, region=%s, owner_key=%v", userID, region, ownerKey != "")
+
+	displayName, ok := normalizeDisplayName(displayName)
+	if !ok {
+		return &models.CreateNodeResponse{
+			Success: false,
+			Status:  "invalid_display_name",
+			Message: "节点名称需为 1–40 个字符",
+		}, nil
+	}
 
 	nodeKind := models.NodeKindHostedLegacy
 	if ownerKey != "" {
@@ -907,6 +917,7 @@ func (s *ProvisionService) CreateUserNode(ctx context.Context, userID, region, o
 		TrafficLimit:   s.getTrafficLimit(subStatus.PlanTier),
 		OwnerKey:       ownerKey,
 		UserInitiated:  true,
+		DisplayName:    displayName,
 	}
 
 	resp, err := s.Provision(ctx, provisionReq)

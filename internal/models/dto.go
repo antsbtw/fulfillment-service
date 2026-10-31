@@ -53,6 +53,8 @@ type ProvisionRequest struct {
 	OwnerKey string `json:"-"`
 	// UserInitiated 仅 POST /my/node 内部使用:用户在 App 里主动建机,不受"延迟开通"约束。
 	UserInitiated bool `json:"-"`
+	// DisplayName 仅 POST /my/node 内部使用:用户填的节点显示名,转交 hosting 落到节点上。
+	DisplayName string `json:"-"`
 }
 
 // ProvisionResponse is returned after starting provisioning
@@ -219,6 +221,8 @@ type CreateNodeRequest struct {
 	Region string `json:"region" binding:"required"`
 	// OwnerKey 新版 App 带设备公钥 → 新式托管机;缺省 → 老式(老 App 兼容)。
 	OwnerKey string `json:"owner_key,omitempty"`
+	// DisplayName 可选:用户给新机器起的名字(1–40 字符),只用于展示,多设备同步。
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // RecreateNodeRequest is for user-initiated node recreation
