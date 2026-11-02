@@ -46,6 +46,9 @@ func main() {
 	if err := db.EnsureRefundRevocationSchema(context.Background(), pool); err != nil {
 		log.Fatalf("Failed to ensure refund revocation schema: %v", err)
 	}
+	if err := db.EnsureHostingOneLivePerUser(context.Background(), pool); err != nil {
+		log.Printf("WARNING: %v — falling back to application-level check only", err)
+	}
 
 	// Initialize repositories
 	hostingRepo := repository.NewHostingProvisionRepository(pool)

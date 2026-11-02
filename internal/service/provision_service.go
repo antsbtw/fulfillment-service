@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -188,6 +189,18 @@ func (s *ProvisionService) Provision(ctx context.Context, req *models.ProvisionR
 	}
 
 	if err := s.hostingRepo.Create(ctx, hp); err != nil {
+		// 并发开机(两台手机同时点,或 POST /my/node 与购买自动开通同时到达):
+		// 先查后建都通过了,由迁移 013 的唯一索引兜住,返回已有那条。
+		if errors.Is(err, repository.ErrLiveProvisionExists) {
+			if live, gerr := s.hostingRepo.GetActiveByUser(ctx, req.UserID); gerr == nil && live != nil {
+				log.Printf("[Provision] concurrent create for user=%s, returning live provision %s (status=%s)", req.UserID, live.ID, live.Status)
+				return &models.ProvisionResponse{
+					ResourceID: live.ID,
+					Status:     live.Status,
+					Message:    "Provision already exists for this user",
+				}, nil
+			}
+		}
 		return nil, fmt.Errorf("create hosting provision: %w", err)
 	}
 

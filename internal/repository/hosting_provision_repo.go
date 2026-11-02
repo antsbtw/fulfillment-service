@@ -6,11 +6,22 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/models"
 )
 
 var ErrNotFound = errors.New("not found")
+
+// ErrLiveProvisionExists 该账号已有一条在用托管开通记录(撞迁移 013 的 uq_hosting_prov_user_live)。
+var ErrLiveProvisionExists = errors.New("user already has a live hosting provision")
+
+const uqHostingProvUserLive = "uq_hosting_prov_user_live"
+
+func isLiveProvisionConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == uqHostingProvUserLive
+}
 
 type HostingProvisionRepository struct {
 	pool *pgxpool.Pool
@@ -40,6 +51,9 @@ func (r *HostingProvisionRepository) Create(ctx context.Context, hp *models.Host
 		hp.PublicIP, hp.APIPort, hp.APIKey, hp.VlessPort, hp.SSPort, hp.PublicKey, hp.ShortID,
 		hp.Status, hp.ErrorMessage, hp.PlanTier, hp.TrafficLimit, hp.TrafficUsed, hp.NeedsCleanup, hp.NodeKindOrLegacy(),
 	)
+	if isLiveProvisionConflict(err) {
+		return ErrLiveProvisionExists
+	}
 	if err != nil {
 		return fmt.Errorf("insert hosting_provision: %w", err)
 	}

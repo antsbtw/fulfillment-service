@@ -148,3 +148,15 @@ func EnsureRefundRevocationSchema(ctx context.Context, pool *pgxpool.Pool) error
 	}
 	return nil
 }
+
+// EnsureHostingOneLivePerUser 幂等地建迁移 013 的部分唯一索引(每个账号最多一条在用托管开通记录)。
+// 存量若已有重复行,建索引会失败;调用方只记日志不退出,应用层的先查后建仍然有效。
+func EnsureHostingOneLivePerUser(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS uq_hosting_prov_user_live
+		ON fulfillment.hosting_provisions(user_id)
+		WHERE status NOT IN ('deleted', 'failed') AND deleted_at IS NULL`)
+	if err != nil {
+		return fmt.Errorf("ensure hosting one-live-per-user index (migration 013): %w", err)
+	}
+	return nil
+}
