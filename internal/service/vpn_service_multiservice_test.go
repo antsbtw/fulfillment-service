@@ -98,6 +98,17 @@ func (f *fakeVPNStore) GetBySubscriptionIDAndFace(_ context.Context, subID, face
 	return nil, nil
 }
 
+// GetLatestBySubscriptionIDAndFace：不限账号/状态/is_current，最后一条优先（模拟 created_at DESC）。
+func (f *fakeVPNStore) GetLatestBySubscriptionIDAndFace(_ context.Context, subID, face string) (*models.VPNProvision, error) {
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		if r.SubscriptionID == subID && faceOf(r) == face {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
 // 原（非分区）查询：取该 user 任意 service_tier 的 current 记录（最后一条优先，模拟 created_at DESC）。
 func (f *fakeVPNStore) GetCurrentByUserAnyStatus(_ context.Context, userID string) (*models.VPNProvision, error) {
 	for i := len(f.rows) - 1; i >= 0; i-- {

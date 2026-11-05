@@ -33,6 +33,7 @@ type otunStub struct {
 	mu       sync.Mutex
 	accounts map[string]map[string]interface{} // uuid → {traffic_limit, traffic_used, expire_at, enabled}
 	puts     []map[string]interface{}
+	posts    []map[string]interface{} // POST /api/users 请求体（住宅面 upsert 走这里）
 }
 
 func newOtunStub(t *testing.T) (*otunStub, *httptest.Server) {
@@ -44,6 +45,7 @@ func newOtunStub(t *testing.T) (*otunStub, *httptest.Server) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		uuid, _ := body["uuid"].(string)
 		st.mu.Lock()
+		st.posts = append(st.posts, body)
 		st.accounts[uuid] = map[string]interface{}{
 			"uuid": uuid, "traffic_limit": body["traffic_limit"], "traffic_used": float64(0),
 			"expire_at": body["expire_at"], "enabled": true,

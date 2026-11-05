@@ -238,6 +238,19 @@ func (r *VPNProvisionRepository) GetBySubscriptionIDAndFace(ctx context.Context,
 	return r.scanOne(r.pool.QueryRow(ctx, query, subscriptionID, face))
 }
 
+// GetLatestBySubscriptionIDAndFace 取该订阅在该产品面上【最近一条】开通记录，不限账号、不限状态、
+// 不限 is_current。订阅换绑 / 换绑后再换回时用：同一期已经开通过（可能在另一个账号上、或已被停用），
+// 新开通要沿用这一期原来的到期和剩余流量，而不是按 now+30d 重新给一期（2026-11-05 x26262468 案）。
+func (r *VPNProvisionRepository) GetLatestBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error) {
+	query := fmt.Sprintf(`
+		SELECT %s FROM fulfillment.vpn_provisions
+		WHERE subscription_id = $1 AND COALESCE(product_face, 'basic') = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, vpnColumns)
+	return r.scanOne(r.pool.QueryRow(ctx, query, subscriptionID, face))
+}
+
 func (r *VPNProvisionRepository) GetBySubscriptionID(ctx context.Context, subscriptionID string) (*models.VPNProvision, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM fulfillment.vpn_provisions

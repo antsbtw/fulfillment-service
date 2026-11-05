@@ -135,6 +135,8 @@ func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {
 		Reason        string `json:"reason"`
 		PlanTier      string `json:"plan_tier"`
 		IsResidential *bool  `json:"is_residential"`
+		// SubscriptionID：换绑的那笔订阅。带了就只回收属于它的记录（2026-11-05）；老调用方不带 = 原行为。
+		SubscriptionID string `json:"subscription_id"`
 	}
 	_ = c.ShouldBindJSON(&req)
 	if req.Reason == "" {
@@ -148,7 +150,7 @@ func (h *Handler) DeprovisionVPNByUser(c *gin.Context) {
 		return
 	}
 
-	if err := h.vpnService.DeprovisionVPNByUser(c.Request.Context(), userID, req.Reason, isResidential); err != nil {
+	if err := h.vpnService.DeprovisionVPNByUser(c.Request.Context(), userID, req.Reason, isResidential, req.SubscriptionID); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "no current VPN user for this user"})
 			return

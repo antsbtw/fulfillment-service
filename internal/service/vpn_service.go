@@ -40,6 +40,8 @@ type vpnProvisionStore interface {
 	ListCurrentByUser(ctx context.Context, userID string) ([]*models.VPNProvision, error)
 	GetOtunUUIDByUserAndFace(ctx context.Context, userID, face string) (*string, error)
 	GetBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error)
+	// GetLatestBySubscriptionIDAndFace：该订阅该面最近一条记录（不限账号/状态/is_current），换绑沿用本期用。
+	GetLatestBySubscriptionIDAndFace(ctx context.Context, subscriptionID, face string) (*models.VPNProvision, error)
 	Create(ctx context.Context, vp *models.VPNProvision) error
 	Update(ctx context.Context, vp *models.VPNProvision) error
 	MarkNotCurrent(ctx context.Context, id string) error
@@ -298,7 +300,80 @@ func isPlatformPeriodReplay(req *models.ProvisionRequest, existing *models.VPNPr
 	return !req.PeriodEnd.After(existing.ExpireAt.Add(platformReplaySlack))
 }
 
-// provisionVPNUserLegacy 是开关 false（及 trial）沿用的旧路径，逐字节不动。
+// periodInheritance：同一期平台订阅被重新开通（换绑到另一个账号，或换绑走又换回来）时，
+// 新开通沿用这一期原来给的到期和流量，而不是按 now+30d / 满额重新给一期。
+type periodInheritance struct {
+	prior        *models.VPNProvision
+	expireAt     time.Time
+	trafficLimit int64
+	// sameUser：上一条记录就在本账号上（换走又换回）。此时 otun 侧是同一个账号，
+	// 保留已用流量（preserveUsed）即可，上限沿用原值；跨账号则上限 = 原上限 − 已用。
+	sameUser bool
+}
+
+// resolvePeriodInheritance 判断本次 apple/google 开通是否是"同一期在别处已开通过"的重新开通。
+//
+// 2026-11-05 x26262468 案：同一 Apple 交易在 gmail / icloud 两个账号间被"恢复购买"来回换绑，
+// 每次换绑都按 now+30d、满额 100GB 新开一期——本期 11-14 到期的订阅被延到 12-05、已用 36GB 被清零；
+// 10-18 那次人工换绑也把 11-13 延到了 11-17。
+//
+// 只在以下条件全部满足时沿用（其余情况返回 nil，行为与原来一致）：
+//   - 渠道 apple/google，带 subscription_id 和 period_end；
+//   - 该订阅该面已有开通记录，且它【不是】本账号当前在用的那条（跨账号，或已停用/非 current）；
+//   - 本次 period_end 落在那条记录的到期内（isPlatformPeriodReplay）= 同一期，不是续费；
+//   - 那条记录还没到期。
+func (s *VPNService) resolvePeriodInheritance(ctx context.Context, req *models.ProvisionRequest, isResidential bool) *periodInheritance {
+	if req.SubscriptionID == "" || req.PeriodEnd == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Channel)) {
+	case "apple", "google":
+	default:
+		return nil
+	}
+	prior, err := s.vpnRepo.GetLatestBySubscriptionIDAndFace(ctx, req.SubscriptionID, models.PartitionFace(isResidential))
+	if err != nil || prior == nil || prior.ExpireAt == nil {
+		return nil
+	}
+	if prior.UserID == req.UserID && prior.IsCurrent && prior.Status == models.VPNProvisionStatusActive {
+		return nil // 本账号正在用的那条：同账号重放/续费，走原有逻辑
+	}
+	if !isPlatformPeriodReplay(req, prior) || !prior.ExpireAt.After(time.Now()) {
+		return nil
+	}
+	inh := &periodInheritance{
+		prior:        prior,
+		expireAt:     *prior.ExpireAt,
+		trafficLimit: prior.TrafficLimit,
+		sameUser:     prior.UserID == req.UserID,
+	}
+	if !inh.sameUser {
+		// 跨账号：新账号在 otun 侧是另一个账号，已用流量带不过去 → 上限扣掉原账号已用的部分。
+		// 投影行 traffic_used 是死列，已用以 otun-manager 实时值为准；取不到就不扣（不比原来更差）。
+		var used int64
+		if prior.OtunUUID != nil && *prior.OtunUUID != "" && s.otunClient != nil {
+			if live, lerr := s.otunClient.GetUser(ctx, *prior.OtunUUID); lerr == nil && live != nil {
+				used = live.TrafficUsed
+			} else {
+				log.Printf("[VPNService] period inheritance: GetUser(%s) failed, not deducting used traffic: %v", *prior.OtunUUID, lerr)
+			}
+		}
+		if used > 0 {
+			inh.trafficLimit = prior.TrafficLimit - used
+			if inh.trafficLimit < 0 {
+				inh.trafficLimit = 0
+			}
+		}
+	}
+	log.Printf("[VPNService] Same-period re-provision for subscription=%s: prior provision=%s (user=%s, status=%s) → user=%s inherits expire=%s limit=%d same_user=%v",
+		req.SubscriptionID, prior.ID, prior.UserID, prior.Status, req.UserID,
+		inh.expireAt.Format(time.RFC3339), inh.trafficLimit, inh.sameUser)
+	return inh
+}
+
+// provisionVPNUserLegacy 是开关 false（及 trial）沿用的旧路径。
+// 2026-11-05 起两处改动（换绑修复）：① 按订阅号的幂等短路只对【本账号】的记录生效；
+// ② 同一期重新开通沿用原到期/流量（resolvePeriodInheritance）。
 
 func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.ProvisionRequest) (*models.ProvisionResponse, error) {
 	log.Printf("[VPNService] Provisioning VPN user for subscription=%s, plan=%s, channel=%s",
@@ -320,6 +395,14 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 
 	if req.SubscriptionID != "" {
 		existingBySubID, _ := s.resolveExistingBySubID(ctx, req.SubscriptionID, reqIsResidential)
+		// ★换绑修复（2026-11-05，BUG_2026-10-18_REASSIGN_RACE）：订阅号不变但账号换了时，按订阅号查到的是
+		// 【旧账号】那条记录。此前直接把它当"已开通"短路返回，新账号什么都没拿到，随后旧账号被回收 →
+		// 两个账号都没线路。记录不属于本账号就不短路，往下按新账号开通。
+		if existingBySubID != nil && existingBySubID.UserID != req.UserID {
+			log.Printf("[VPNService] subscription=%s current provision=%s belongs to user=%s, provisioning for new user=%s (reassign)",
+				req.SubscriptionID, existingBySubID.ID, existingBySubID.UserID, req.UserID)
+			existingBySubID = nil
+		}
 		if existingBySubID != nil && existingBySubID.Status == models.VPNProvisionStatusActive && existingBySubID.OtunUUID != nil {
 			incomingServiceTier := models.MapPlanToServiceTier(req.PlanTier)
 			tierUnchanged := existingBySubID.ServiceTier == incomingServiceTier &&
@@ -372,6 +455,9 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 		}
 	}
 
+	// 同一期平台订阅在别处已开通过（换绑/换回）→ 沿用原到期与流量（nil = 不适用，行为同原来）。
+	inherit := s.resolvePeriodInheritance(ctx, req, reqIsResidential)
+
 	// Determine business_type from request
 	businessType := req.BusinessType
 	if businessType == "" {
@@ -398,6 +484,12 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 		stacked := false // 付费同渠道叠加：true 时上限已累加、下发不清零已用
 		switch req.Channel {
 		case "apple", "google", "trial", "gift":
+			if inherit != nil {
+				// 同一期重新开通：沿用原到期/流量；同账号换回时保留已用流量。
+				expireAt, trafficLimit, stacked = inherit.expireAt, inherit.trafficLimit, inherit.sameUser
+				log.Printf("[VPNService] %s: same-period re-provision, inherited expire=%s", req.Channel, expireAt.Format(time.RFC3339))
+				break
+			}
 			expireAt = s.calculateExpireAt(expireDays)
 			log.Printf("[VPNService] %s: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
 		default:
@@ -497,8 +589,12 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 	trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
 	expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
 	expireAt := s.calculateExpireAt(expireDays)
-	log.Printf("[VPNService] ProvisionVPNUser: expireDays=%d, trafficLimit=%d, expireAt=%s",
-		expireDays, trafficLimit, expireAt.Format(time.RFC3339))
+	preserveUsed := false
+	if inherit != nil {
+		expireAt, trafficLimit, preserveUsed = inherit.expireAt, inherit.trafficLimit, inherit.sameUser
+	}
+	log.Printf("[VPNService] ProvisionVPNUser: expireDays=%d, trafficLimit=%d, expireAt=%s, inherited=%v",
+		expireDays, trafficLimit, expireAt.Format(time.RFC3339), inherit != nil)
 
 	// 3. Check if user has an existing otun_uuid from any previous provision (e.g., trial)
 	existingOtunUUID, _ := s.resolveExistingOtunUUID(ctx, req.UserID, reqIsResidential)
@@ -508,7 +604,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 	if existingOtunUUID != nil && *existingOtunUUID != "" {
 		// Reuse existing otun_uuid (e.g., trial → purchase conversion)
 		actualVPNUserID = *existingOtunUUID
-		if err := s.syncOtunUserQuota(ctx, actualVPNUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt, false); err != nil {
+		if err := s.syncOtunUserQuota(ctx, actualVPNUserID, serviceTier, req.UserID, req.UserEmail, trafficLimit, expireAt, preserveUsed); err != nil {
 			return nil, fmt.Errorf("failed to update existing VPN user: %w", err)
 		}
 
@@ -630,6 +726,13 @@ func (s *VPNService) resolveExistingOtunUUID(ctx context.Context, userID string,
 
 // DeprovisionVPNUser disables a VPN user
 func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason string) error {
+	return s.deprovisionVPNUser(ctx, provisionID, reason, true)
+}
+
+// deprovisionVPNUser：notifySubscription=false 时不回调 subscription-service 的 deleted。
+// 换绑回收必须传 false：回调按【订阅号】把订阅标 expired，而此时订阅已归新账号
+// （BUG_2026-10-18_REASSIGN_RACE 原因 2，10-18 与 11-05 两次都出现 "subscription deleted via fulfillment"）。
+func (s *VPNService) deprovisionVPNUser(ctx context.Context, provisionID, reason string, notifySubscription bool) error {
 	log.Printf("[VPNService] Deprovisioning VPN user: provision=%s, reason=%s", provisionID, reason)
 
 	vp, err := s.vpnRepo.GetByID(ctx, provisionID)
@@ -654,7 +757,7 @@ func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason
 	s.logRepo.LogAction(ctx, vp.ID, "vpn", "vpn_user_deprovisioned", "disabled", reason)
 
 	// Notify subscription-service
-	if vp.SubscriptionID != "" {
+	if notifySubscription && vp.SubscriptionID != "" && s.subscriptionClient != nil {
 		if err := s.subscriptionClient.NotifyVPNDeleted(ctx, vp.SubscriptionID, vp.ID); err != nil {
 			log.Printf("[VPNService] Failed to notify subscription-service (deleted): %v", err)
 		}
@@ -673,13 +776,24 @@ func (s *VPNService) DeprovisionVPNUser(ctx context.Context, provisionID, reason
 // standard 时可能误停 residential。isResidential 由调用方按事件 plan_tier 推导；调用方未传面
 //（老 subscription-service）时 isResidential=nil，退回旧的不分区行为（兼容，不阻断换绑）。
 // 用户该面本就没有 current provision 时返回 repository.ErrNotFound（调用方据此回 404 + 幂等处理）。
-func (s *VPNService) DeprovisionVPNByUser(ctx context.Context, userID, reason string, isResidential *bool) error {
+//
+// ★换绑修复（2026-11-05）：
+//   - subscriptionID 非空时，只回收【属于这笔订阅】的那条记录。旧账号该面当前的记录若是别的订阅
+//     （如它自己的 trial），不动、返回 ErrNotFound——11-05 订阅换回 gmail 时，按"该用户该面当前记录"
+//     把 icloud 账号自己的 10GB trial 停掉了。subscriptionID 为空（老调用方）保持原行为。
+//   - 回收后不回调 subscription-service（见 deprovisionVPNUser）。
+func (s *VPNService) DeprovisionVPNByUser(ctx context.Context, userID, reason string, isResidential *bool, subscriptionID string) error {
 	vp, err := s.resolveDeprovisionTarget(ctx, userID, isResidential)
 	if err != nil {
 		// 含 repository.ErrNotFound：无可回收的 VPN 用户。
 		return err
 	}
-	return s.DeprovisionVPNUser(ctx, vp.ID, reason)
+	if subscriptionID != "" && vp.SubscriptionID != subscriptionID {
+		log.Printf("[VPNService] reassign deprovision: user=%s current provision=%s belongs to subscription=%s, not %s — leaving it alone",
+			userID, vp.ID, vp.SubscriptionID, subscriptionID)
+		return repository.ErrNotFound
+	}
+	return s.deprovisionVPNUser(ctx, vp.ID, reason, false)
 }
 
 // resolveDeprovisionTarget 是 DeprovisionVPNByUser 的定位收口：给了面 → 分区查询；没给 → 旧行为。
