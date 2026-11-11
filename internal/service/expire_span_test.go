@@ -71,3 +71,57 @@ func TestResolvePaidStacking_CalendarMonths(t *testing.T) {
 		t.Errorf("expired: got %v %v, want %v", e, stacked, want)
 	}
 }
+
+// Apple / Google 正式环境:节点到期 = 平台 period_end(由平台定);其余情况退回 30 天老口径。
+func TestExpireSpanOf_PlatformPeriodEnd(t *testing.T) {
+	s := &VPNService{}
+	now := time.Now()
+	appleEnd := now.Add(31*24*time.Hour + time.Hour) // 31 天周期(如 10-28 → 11-28)
+	past := now.Add(-time.Hour)
+
+	cases := []struct {
+		name    string
+		req     models.ProvisionRequest
+		usePlat bool
+	}{
+		{"apple production", models.ProvisionRequest{Channel: "apple", Environment: "Production", PeriodEnd: &appleEnd}, true},
+		{"google production", models.ProvisionRequest{Channel: "google", Environment: "Production", PeriodEnd: &appleEnd}, true},
+		{"apple sandbox keeps 30d", models.ProvisionRequest{Channel: "apple", Environment: "Sandbox", PeriodEnd: &appleEnd}, false},
+		{"no environment (old upstream) keeps 30d", models.ProvisionRequest{Channel: "apple", PeriodEnd: &appleEnd}, false},
+		{"no period_end keeps 30d", models.ProvisionRequest{Channel: "apple", Environment: "Production"}, false},
+		{"period_end passed keeps 30d", models.ProvisionRequest{Channel: "apple", Environment: "Production", PeriodEnd: &past}, false},
+		{"stripe ignores period_end", models.ProvisionRequest{Channel: "stripe", Environment: "production", PeriodEnd: &appleEnd, ExpireDays: 30}, false},
+	}
+	for _, c := range cases {
+		req := c.req
+		got := s.expireSpanOf(&req).endFrom(now)
+		if c.usePlat {
+			if !got.Equal(appleEnd.UTC()) {
+				t.Errorf("%s: got %v, want platform end %v", c.name, got, appleEnd)
+			}
+		} else if want := now.AddDate(0, 0, 30); !got.Equal(want) {
+			t.Errorf("%s: got %v, want now+30d %v", c.name, got, want)
+		}
+	}
+}
+
+// 同一期重放:按平台到期开通后,同一 period_end 再来一次不算"延长",走幂等短路。
+func TestPlatformPeriodEnd_ReplayDoesNotExtend(t *testing.T) {
+	s := &VPNService{}
+	end := time.Now().Add(20 * 24 * time.Hour).UTC()
+	req := &models.ProvisionRequest{Channel: "apple", Environment: "Production", PeriodEnd: &end}
+	existing := end // 第一次开通写下的节点到期
+	prospective := s.expireSpanOf(req).endFrom(time.Now())
+	if prospective.After(existing.Add(time.Minute)) {
+		t.Fatalf("replay should not extend: prospective=%v existing=%v", prospective, existing)
+	}
+	// 真续费:下一期 period_end 比现有晚约一个周期 → 延长、且不被当作重放。
+	next := end.AddDate(0, 1, 0)
+	req.PeriodEnd = &next
+	if p := s.expireSpanOf(req).endFrom(time.Now()); !p.After(existing.Add(time.Minute)) {
+		t.Fatalf("renewal should extend: %v", p)
+	}
+	if isPlatformPeriodReplay(req, &models.VPNProvision{ExpireAt: &existing}) {
+		t.Fatalf("renewal misjudged as replay")
+	}
+}

@@ -33,6 +33,8 @@ type ProvisionRequest struct {
 	// 为 0 时按 ExpireDays。由 subscription-service 对按月一次性购买转来。
 	ExpireMonths    int `json:"expire_months,omitempty"`
 	ExpireBonusDays int `json:"expire_bonus_days,omitempty"`
+	// Environment 平台订阅的环境(Apple/Google:Production / Sandbox),由 subscription-service 转来。
+	Environment string `json:"environment,omitempty"`
 
 	// v3.1 新增
 	ProductID    string `json:"product_id,omitempty"`

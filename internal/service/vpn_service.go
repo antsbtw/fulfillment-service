@@ -282,8 +282,8 @@ func (s *VPNService) provisionViaEntitlement(ctx context.Context, req *models.Pr
 	}, nil
 }
 
-// platformReplaySlack 是判"同一期重放"的余量：开通时 expire 按 now+30d 写，与 Apple/Google 的 period_end
-// 实测差 0–2 天；真续期的 period_end 比现有到期晚约一个周期（≥28 天），7 天足以区分两者。
+// platformReplaySlack 是判"同一期重放"的余量：正式环境开通时 expire 就是平台 period_end（2026-11-11 起；
+// 此前按 now+30d 写，与 period_end 实测差 0–2 天，存量记录仍是这样）；真续期的 period_end 比现有到期晚约一个周期（≥28 天），7 天足以区分两者。
 const platformReplaySlack = 7 * 24 * time.Hour
 
 // isPlatformPeriodReplay 判断本次 apple/google 订阅请求是否是已开通周期的重放（而非续期）：
@@ -409,7 +409,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 				existingBySubID.PlanTier == req.PlanTier
 
 			// 用与 renewal 分支同源的算法预估本次请求想要的 expireAt，判断是否在延长周期。
-			// gift/trial/apple/google 都是 fresh period（calculateExpireAt），与下方 switch 一致。
+			// gift/trial 是 fresh period；apple/google 正式环境 = 平台 period_end（expireSpanOf），与下方 switch 一致。
 			prospectiveExpireAt := s.expireSpanOf(req).endFrom(time.Now())
 			// 容差 1 分钟，避免“同一秒重复回放”因纳秒级差异被误判为延长而反复下发。
 			extendsExpiry := existingBySubID.ExpireAt == nil ||
