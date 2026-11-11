@@ -29,6 +29,10 @@ type ProvisionRequest struct {
 	Region       string `json:"region"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	ExpireDays   int    `json:"expire_days"`
+	// ExpireMonths > 0:按自然月开通(月底落当月最后一天),再加 ExpireBonusDays 天;
+	// 为 0 时按 ExpireDays。由 subscription-service 对按月一次性购买转来。
+	ExpireMonths    int `json:"expire_months,omitempty"`
+	ExpireBonusDays int `json:"expire_bonus_days,omitempty"`
 
 	// v3.1 新增
 	ProductID    string `json:"product_id,omitempty"`

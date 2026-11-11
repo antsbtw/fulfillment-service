@@ -143,7 +143,7 @@ func entryInputFromRequest(s *VPNService, req *models.ProvisionRequest) *EntryIn
 		ChannelSubID:   req.ChannelSubID,
 		PurchaseType:   req.PurchaseType,
 		BusinessType:   req.BusinessType,
-		Days:           s.calculateExpireDays(req.Channel, req.ExpireDays),
+		Days:           s.expireSpanOf(req).approxDays(time.Now()),
 		Traffic:        s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit),
 		PeriodStart:    req.PeriodStart,
 		PeriodEnd:      req.PeriodEnd,
@@ -410,8 +410,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 
 			// 用与 renewal 分支同源的算法预估本次请求想要的 expireAt，判断是否在延长周期。
 			// gift/trial/apple/google 都是 fresh period（calculateExpireAt），与下方 switch 一致。
-			prospectiveExpireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
-			prospectiveExpireAt := s.calculateExpireAt(prospectiveExpireDays)
+			prospectiveExpireAt := s.expireSpanOf(req).endFrom(time.Now())
 			// 容差 1 分钟，避免“同一秒重复回放”因纳秒级差异被误判为延长而反复下发。
 			extendsExpiry := existingBySubID.ExpireAt == nil ||
 				prospectiveExpireAt.After(existingBySubID.ExpireAt.Add(time.Minute))
@@ -472,7 +471,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 	if err == nil && existing != nil && existing.OtunUUID != nil && *existing.OtunUUID != "" {
 		// Renewal scenario: update expire_at and traffic_limit
 		vpnUserID := *existing.OtunUUID
-		expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
+		span := s.expireSpanOf(req)
 		trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
 
 		// Determine expiration strategy by channel:
@@ -490,12 +489,12 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 				log.Printf("[VPNService] %s: same-period re-provision, inherited expire=%s", req.Channel, expireAt.Format(time.RFC3339))
 				break
 			}
-			expireAt = s.calculateExpireAt(expireDays)
+			expireAt = span.endFrom(time.Now())
 			log.Printf("[VPNService] %s: fresh period, expire=%s", req.Channel, expireAt.Format(time.RFC3339))
 		default:
 			if existing.Channel == "trial" || existing.Channel == "gift" {
 				// Channel upgrade from free to paid: don't stack free trial/gift remaining time
-				expireAt = s.calculateExpireAt(expireDays)
+				expireAt = span.endFrom(time.Now())
 				log.Printf("[VPNService] Channel upgrade %s → %s: fresh period, expire=%s",
 					existing.Channel, req.Channel, expireAt.Format(time.RFC3339))
 			} else {
@@ -508,7 +507,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 					log.Printf("[VPNService] stacking: otun-manager GetUser failed (uuid=%s), falling back to projection row: %v", vpnUserID, lerr)
 					live = nil
 				}
-				expireAt, trafficLimit, stacked = resolvePaidStacking(existing, live, time.Now(), expireDays, trafficLimit)
+				expireAt, trafficLimit, stacked = resolvePaidStacking(existing, live, time.Now(), span, trafficLimit)
 				if stacked {
 					log.Printf("[VPNService] Paid purchase stacking: uuid=%s expire→%s limit→%d (used preserved)",
 						vpnUserID, expireAt.Format(time.RFC3339), trafficLimit)
@@ -587,14 +586,14 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 
 	// 2. Calculate traffic limit and expire time
 	trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
-	expireDays := s.calculateExpireDays(req.Channel, req.ExpireDays)
-	expireAt := s.calculateExpireAt(expireDays)
+	span := s.expireSpanOf(req)
+	expireAt := span.endFrom(time.Now())
 	preserveUsed := false
 	if inherit != nil {
 		expireAt, trafficLimit, preserveUsed = inherit.expireAt, inherit.trafficLimit, inherit.sameUser
 	}
-	log.Printf("[VPNService] ProvisionVPNUser: expireDays=%d, trafficLimit=%d, expireAt=%s, inherited=%v",
-		expireDays, trafficLimit, expireAt.Format(time.RFC3339), inherit != nil)
+	log.Printf("[VPNService] ProvisionVPNUser: expireDays=%d, expireMonths=%d, bonusDays=%d, trafficLimit=%d, expireAt=%s, inherited=%v",
+		span.Days, span.Months, span.BonusDays, trafficLimit, expireAt.Format(time.RFC3339), inherit != nil)
 
 	// 3. Check if user has an existing otun_uuid from any previous provision (e.g., trial)
 	existingOtunUUID, _ := s.resolveExistingOtunUUID(ctx, req.UserID, reqIsResidential)
@@ -1845,16 +1844,15 @@ func (s *VPNService) calculateExpireAt(days int) time.Time {
 // resolvePaidStacking 付费同渠道再购（stripe→stripe / credit→credit …）的叠加裁决（纯函数，2026-09-23）。
 //
 // 规则（用户 2026-09-23 拍板，与 campaign 面 "7天10G+7天10G=14天20G" 及形态 B §2 订购桶同口径）：
-//   - 基准权益未过期 → 到期 = 基准到期 + days；上限 = 基准上限 + newLimit；stacked=true（已用保留）。
-//   - 基准已过期/缺失 → 到期 = now + days；上限 = newLimit；stacked=false（fresh period，与现状一致）。
+//   - 基准权益未过期 → 到期 = 基准到期 + 本次时长；上限 = 基准上限 + newLimit；stacked=true（已用保留）。
+//   - 基准已过期/缺失 → 到期 = now + 本次时长；上限 = newLimit；stacked=false（fresh period，与现状一致）。
+//
+// 本次时长按月购买时是自然月（2026-11-11，见 expire_span.go），否则按天。
 //
 // 基准取值：优先 otun-manager 实时账号 live（数据面真源，"用户实际还剩多少"），
 // live 为 nil 或 expire_at 不可解析时退回投影行 existing。此前只认 live、取不到就 now+days，
 // 住宅 uuid 在 manager 恒 404 → 叠加静默失效三个月（euanjam8 案）。
-func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo, now time.Time, days int, newLimit int64) (time.Time, int64, bool) {
-	if days <= 0 {
-		days = 30
-	}
+func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo, now time.Time, span expireSpan, newLimit int64) (time.Time, int64, bool) {
 	var baseExpire *time.Time
 	var baseLimit int64
 	if live != nil && live.ExpireAt != "" {
@@ -1871,9 +1869,9 @@ func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo
 		baseLimit = existing.TrafficLimit
 	}
 	if baseExpire == nil || !baseExpire.After(now) {
-		return now.AddDate(0, 0, days), newLimit, false
+		return span.endFrom(now), newLimit, false
 	}
-	return baseExpire.AddDate(0, 0, days), baseLimit + newLimit, true
+	return span.endFrom(*baseExpire), baseLimit + newLimit, true
 }
 
 // notifyVPNActive notifies subscription-service that VPN is active

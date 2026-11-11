@@ -59,7 +59,7 @@ func TestResolvePaidStacking(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotExpire, gotLimit, gotStack := resolvePaidStacking(tc.existing, tc.live, now, 30, 100*gb)
+			gotExpire, gotLimit, gotStack := resolvePaidStacking(tc.existing, tc.live, now, expireSpan{Days: 30}, 100*gb)
 			if !gotExpire.Equal(tc.wantExpire) {
 				t.Errorf("expire = %s, want %s", gotExpire.Format(time.RFC3339), tc.wantExpire.Format(time.RFC3339))
 			}
@@ -73,7 +73,7 @@ func TestResolvePaidStacking(t *testing.T) {
 	}
 
 	// days<=0 兜底 30 天（与 calculateExpireAt 一致）
-	if e, _, _ := resolvePaidStacking(prov(nil, 0), nil, now, 0, gb); !e.Equal(now.AddDate(0, 0, 30)) {
+	if e, _, _ := resolvePaidStacking(prov(nil, 0), nil, now, expireSpan{}, gb); !e.Equal(now.AddDate(0, 0, 30)) {
 		t.Errorf("days<=0 应兜底 30 天, got %s", e)
 	}
 }
@@ -85,7 +85,7 @@ func TestResolvePaidStacking_EuanjamCase(t *testing.T) {
 	now := time.Date(2026, 9, 23, 13, 22, 35, 0, time.UTC)
 	first := time.Date(2026, 10, 23, 11, 54, 55, 0, time.UTC)
 	existing := &models.VPNProvision{Channel: "stripe", ServiceTier: "residential", ExpireAt: &first, TrafficLimit: 100 * gb}
-	e, l, s := resolvePaidStacking(existing, nil, now, 30, 100*gb)
+	e, l, s := resolvePaidStacking(existing, nil, now, expireSpan{Days: 30}, 100*gb)
 	want := time.Date(2026, 11, 22, 11, 54, 55, 0, time.UTC)
 	if !s || !e.Equal(want) || l != 200*gb {
 		t.Fatalf("got stacked=%v expire=%s limit=%dGB, want true / %s / 200GB", s, e.Format(time.RFC3339), l/gb, want.Format(time.RFC3339))
