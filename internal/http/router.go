@@ -136,6 +136,8 @@ func (s *Server) setupRoutes() {
 
 		// User resource queries (called by user-portal)
 		internal.GET("/users/:user_id/resources", s.handler.GetUserResources)
+		// Apple 退款申请回报:某一笔购买交付了没有、用了多少(只读)
+		internal.GET("/consumption", s.handler.GetConsumption)
 
 		// VPN subscribe config (called by user-portal)
 		internal.GET("/vpn/user/:user_id/subscribe", s.handler.GetUserVPNSubscribe)

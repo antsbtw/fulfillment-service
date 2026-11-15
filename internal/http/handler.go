@@ -17,6 +17,7 @@ type Handler struct {
 	vpnService          *service.VPNService
 	entitlementService  *service.EntitlementService
 	entitlementProfiles *service.EntitlementProfileService
+	consumption         *service.ConsumptionService
 }
 
 func NewHandler(provisionService *service.ProvisionService, vpnService *service.VPNService, entitlementService *service.EntitlementService, entitlementProfiles *service.EntitlementProfileService) *Handler {

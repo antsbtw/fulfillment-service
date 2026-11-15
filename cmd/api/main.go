@@ -138,6 +138,7 @@ func main() {
 
 	// Initialize HTTP server
 	server := http.NewServer(cfg, pool, provisionService, vpnService, entitlementService, entitlementProfiles)
+	server.SetConsumptionService(service.NewConsumptionService(vpnRepo, otunClient, hostingRepo, hostingClient))
 
 	// Start server in goroutine
 	go func() {

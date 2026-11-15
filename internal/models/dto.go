@@ -480,3 +480,19 @@ type UpdateVPNUserRequest struct {
 	ExtendDays   int    `json:"extend_days,omitempty"`   // Days to extend
 	PlanTier     string `json:"plan_tier,omitempty"`     // New plan tier
 }
+
+// ConsumptionResponse GET /api/internal/consumption 的返回:某一笔 Apple 交易交付了没有、用了多少。
+// 供 payment-service 回报 Apple 退款申请(docs/APPLE_CONSUMPTION_RESPONSE_DESIGN.md §4.2)。
+// Supported=false 表示这种商品 fulfillment 答不了(如 OBox Pro 不在本服务开通),调用方不应回报。
+type ConsumptionResponse struct {
+	ResourceType      string     `json:"resource_type"` // otun_basic | otun_residential | obox_hosting | obox_pro
+	Supported         bool       `json:"supported"`
+	Delivered         bool       `json:"delivered"`
+	DeliveredAt       *time.Time `json:"delivered_at,omitempty"`
+	UndeliveredReason string     `json:"undelivered_reason,omitempty"` // not_provisioned | no_node | node_never_ready
+	UsedBytes         int64      `json:"used_bytes"`
+	LimitBytes        int64      `json:"limit_bytes"`
+	UsagePercent      float64    `json:"usage_percent"`
+	ActiveDays        int        `json:"active_days"`
+	Detail            string     `json:"detail,omitempty"`
+}
