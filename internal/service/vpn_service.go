@@ -1433,6 +1433,10 @@ func (s *VPNService) buildQuickStatus(ctx context.Context, vp *models.VPNProvisi
 			// 不是取不到数据。原先 err != nil 一律吞掉 → 投影行的陈旧 active 直接下发，
 			// 端上显示"仍有效"而实际连不上（Alvin basic 面即此路径）。
 			resp.Status = models.VPNProvisionStatusExpired
+			var inactive *client.OTunAccountInactiveError
+			if errors.As(err, &inactive) {
+				resp.InactiveReason = inactive.Reason
+			}
 		default:
 			// 其余错误（网络/5xx）不足以断言到期，保持读时判定的结果，避免误报到期。
 			log.Printf("[VPNService] sync otun user failed (uuid=%s face=%s): %v",

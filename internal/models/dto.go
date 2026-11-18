@@ -421,6 +421,10 @@ type VPNQuickStatus struct {
 	ActiveClass string `json:"active_class,omitempty"`
 	// /status-all 元素补 service_tier（变更清单 §2.4 低优先，H8 非依赖）；仅开关 true 时填充。
 	ServiceTier string `json:"service_tier,omitempty"`
+	// InactiveReason 该面被线路服务停用的原因(2026-11-18,Windows 停用后无限重连案):
+	// traffic_exhausted / subscription_expired / user_disabled。只在 otun-manager 明确回 403 时填,
+	// 其余(正常、取不到、按 entitlement 判到期)不输出。客户端据此区分「流量用完」和「到期」。
+	InactiveReason string `json:"inactive_reason,omitempty"`
 }
 
 // VPNProtocol represents a single VPN protocol configuration.

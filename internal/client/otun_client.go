@@ -27,6 +27,10 @@ type OTunAccountInactiveError struct {
 	// traffic_exhausted / user_disabled…），结构化解析而非文本匹配；解析不到为空串。
 	// handler 层只把 subscription_expired / trial_expired 升成 403 SUBSCRIPTION_EXPIRED。
 	Code string
+	// Reason 是停用原因(2026-11-18 起 otun-manager /sync 的 403 体带 reason 字段):
+	// traffic_exhausted / subscription_expired / user_disabled。老版 manager 没有 reason 时,
+	// Code 本身就是这三者之一(connect-url / subscribe 的 403)则取 Code,否则为空串。
+	Reason string
 }
 
 func (e *OTunAccountInactiveError) Error() string {
@@ -42,10 +46,18 @@ func (e *OTunAccountInactiveError) IsSubscriptionExpired() bool {
 func newOTunAccountInactiveError(statusCode int, body []byte) *OTunAccountInactiveError {
 	e := &OTunAccountInactiveError{StatusCode: statusCode, Body: string(body)}
 	var parsed struct {
-		Error string `json:"error"`
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
 	}
 	if json.Unmarshal(body, &parsed) == nil {
 		e.Code = parsed.Error
+		e.Reason = parsed.Reason
+	}
+	if e.Reason == "" {
+		switch e.Code {
+		case "traffic_exhausted", "subscription_expired", "user_disabled":
+			e.Reason = e.Code
+		}
 	}
 	return e
 }
