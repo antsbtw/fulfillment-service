@@ -472,6 +472,7 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 	if err == nil && existing != nil && existing.OtunUUID != nil && *existing.OtunUUID != "" {
 		// Renewal scenario: update expire_at and traffic_limit
 		vpnUserID := *existing.OtunUUID
+		baseSubscriptionID := existing.SubscriptionID // 叠加回写用:下面同渠道分支会把 existing.SubscriptionID 改成本单
 		span := s.expireSpanOf(req)
 		trafficLimit := s.calculateTrafficLimit(req.PlanTier, req.TrafficLimit)
 
@@ -553,6 +554,9 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 			if err := s.vpnRepo.Create(ctx, newVP); err != nil {
 				log.Printf("[VPNService] Warning: failed to create new provision: %v", err)
 			}
+			if stacked {
+				s.notifyVPNStacked(ctx, req.SubscriptionID, newProvisionID, expireAt, baseSubscriptionID)
+			}
 
 			return &models.ProvisionResponse{
 				ResourceID: newProvisionID,
@@ -576,6 +580,9 @@ func (s *VPNService) provisionVPNUserLegacy(ctx context.Context, req *models.Pro
 		existing.PlanTier = req.PlanTier
 		existing.Status = models.VPNProvisionStatusActive
 		s.vpnRepo.Update(ctx, existing)
+		if stacked {
+			s.notifyVPNStacked(ctx, req.SubscriptionID, existing.ID, expireAt, baseSubscriptionID)
+		}
 
 		return &models.ProvisionResponse{
 			ResourceID: existing.ID,
@@ -1938,6 +1945,28 @@ func (s *VPNService) notifyVPNActive(ctx context.Context, subscriptionID, resour
 	}
 	if err := s.subscriptionClient.NotifyResourceStatus(ctx, callback); err != nil {
 		log.Printf("[VPNService] Failed to notify subscription-service (active): %v", err)
+	}
+}
+
+// notifyVPNStacked 同渠道叠加后通知 subscription-service:本单到期顺延到线路实际到期,基准订单标 merged
+// (B2,2026-11-18)。失败只记日志,线路已开通不受影响;漏掉的由回填脚本补。
+func (s *VPNService) notifyVPNStacked(ctx context.Context, subscriptionID, resourceID string, effectiveEnd time.Time, baseSubscriptionID string) {
+	if subscriptionID == "" || s.subscriptionClient == nil {
+		return
+	}
+	end := effectiveEnd.UTC()
+	callback := &models.SubscriptionCallback{
+		SubscriptionID:     subscriptionID,
+		App:                "otun",
+		Status:             models.StatusActive,
+		Message:            fmt.Sprintf("VPN resource %s stacked, effective until %s", resourceID, end.Format(time.RFC3339)),
+		EffectivePeriodEnd: &end,
+	}
+	if baseSubscriptionID != subscriptionID {
+		callback.MergedFrom = baseSubscriptionID
+	}
+	if err := s.subscriptionClient.NotifyResourceStatus(ctx, callback); err != nil {
+		log.Printf("[VPNService] Failed to notify subscription-service (stacked sub=%s base=%s): %v", subscriptionID, baseSubscriptionID, err)
 	}
 }
 

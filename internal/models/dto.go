@@ -282,6 +282,10 @@ type SubscriptionCallback struct {
 	Reason         string `json:"reason,omitempty"`          // 删除原因：user_initiated（用户主动删除VPS）, subscription_cancelled（订阅取消）
 	Error          string `json:"error,omitempty"`
 	Message        string `json:"message,omitempty"`
+	// ★叠加购买回写(2026-11-18,subscription-service docs/DESIGN_2026-11-18_EFFECTIVE_SUBSCRIPTION_CONSISTENCY.md B2):
+	// 同渠道叠加后线路实际到期 + 被并入的基准订单,让订单表与线路一致(has_active / 官网订阅页)。
+	EffectivePeriodEnd *time.Time `json:"effective_period_end,omitempty"`
+	MergedFrom         string     `json:"merged_from,omitempty"`
 }
 
 // ==================== VPN User DTOs ====================
