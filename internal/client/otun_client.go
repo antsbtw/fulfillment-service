@@ -114,18 +114,21 @@ type UpdateVPNUserRequest struct {
 
 // VPNUserInfo contains VPN user details
 type VPNUserInfo struct {
-	UUID          string   `json:"uuid"`
-	Email         string   `json:"email,omitempty"`
-	ExternalID    string   `json:"external_id,omitempty"`
-	Protocols     []string `json:"protocols"`
-	TrafficLimit  int64    `json:"traffic_limit"`
-	TrafficUsed   int64    `json:"traffic_used"`
-	ExpireAt      string   `json:"expire_at"`
-	Enabled       bool     `json:"enabled"`
-	PrimaryNodeID *string  `json:"primary_node_id,omitempty"`
-	BackupNodeID  *string  `json:"backup_node_id,omitempty"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
+	UUID         string   `json:"uuid"`
+	Email        string   `json:"email,omitempty"`
+	ExternalID   string   `json:"external_id,omitempty"`
+	Protocols    []string `json:"protocols"`
+	TrafficLimit int64    `json:"traffic_limit"`
+	TrafficUsed  int64    `json:"traffic_used"`
+	ExpireAt     string   `json:"expire_at"`
+	// TrafficResetAt 本周期流量起算时刻(otun-manager 月度清零基准;叠加态时 = expire_at)。
+	// 付费叠加按它算基准订单还剩几个月没清零(2026-11-18)。老 manager 住宅面不返回 → 空串。
+	TrafficResetAt string  `json:"traffic_reset_at,omitempty"`
+	Enabled        bool    `json:"enabled"`
+	PrimaryNodeID  *string `json:"primary_node_id,omitempty"`
+	BackupNodeID   *string `json:"backup_node_id,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 // SubscribeRequest is the request for subscribe endpoint

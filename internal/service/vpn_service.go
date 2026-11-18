@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -773,7 +774,7 @@ func (s *VPNService) deprovisionVPNUser(ctx context.Context, provisionID, reason
 // ★P0（规则 §1-#5，2026-08-16）：换绑的是【一笔订阅】，只该回收它所在的服务面。此前用不分区的
 // GetCurrentByUserAnyStatus 取"最新一条 current"，持双面（standard + residential）的用户换绑
 // standard 时可能误停 residential。isResidential 由调用方按事件 plan_tier 推导；调用方未传面
-//（老 subscription-service）时 isResidential=nil，退回旧的不分区行为（兼容，不阻断换绑）。
+// （老 subscription-service）时 isResidential=nil，退回旧的不分区行为（兼容，不阻断换绑）。
 // 用户该面本就没有 current provision 时返回 repository.ErrNotFound（调用方据此回 404 + 幂等处理）。
 //
 // ★换绑修复（2026-11-05）：
@@ -1074,7 +1075,7 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	var exitCountry string
 	var smartStrategy json.RawMessage
 	var realmNodes []models.RealmNodeSummary // ★2c：N=2 出口摘要（region 出口级），仅 realm 分支填
-	var vpnRegions []models.VPNRegion       // ★阶段2：授权集区域包（仅 realm 分支填）
+	var vpnRegions []models.VPNRegion        // ★阶段2：授权集区域包（仅 realm 分支填）
 
 	// 用量默认取 vp，两个分支下方各用自己面的真源覆盖（vpn_provisions 的 traffic_used
 	// 无人回写恒 0，只作老 otun 缺字段时的兜底）。
@@ -1157,12 +1158,12 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 	}
 
 	resp := &models.VPNSubscribeResponse{
-		Status:        "active",
-		Channel:       vp.Channel,
-		PlanTier:      vp.PlanTier,
-		ServiceTier:   vp.ServiceTier,
+		Status:      "active",
+		Channel:     vp.Channel,
+		PlanTier:    vp.PlanTier,
+		ServiceTier: vp.ServiceTier,
 		// ★BACKEND_ANSWERS_VPN_ALL_FIELDS §1（方案 a）：该面 otun 账号 uuid（basic/residential）。
-		VPNUserID:     derefStr(vp.OtunUUID),
+		VPNUserID: derefStr(vp.OtunUUID),
 		// B6（2026-07-08 整改）：subscribe_url 是【下发给客户端】的刷新地址，必须公网可达——
 		// 指本服务自己的公网路由 /api/v1/my/vpn/subscribe（portal nginx /api/v1/my/ 已分发，
 		// JWT 同 App 现有调用），双面通用。★别再拼 OTunManagerURL：那是内网互调地址
@@ -1193,6 +1194,7 @@ func (s *VPNService) buildSubscribeResponse(ctx context.Context, vp *models.VPNP
 //   - 既有字段（H2）：expire_at / traffic_limit / traffic_used = 生效 profile 的值；
 //     protocols/regions/nodes/subscribe_url/smart_strategy/config_version 属该面 otun 账号，不动；
 //   - none：顶层 status="expired"，expire_at = 最后生效 profile 的到期（不为 null）。
+//
 // 记账层无该面 profile（如仅回填前的存量、或影子写尚未发生）→ 不动任何字段（零回归）。
 func (s *VPNService) attachEntitlementProfiles(ctx context.Context, resp *models.VPNSubscribeResponse, vp *models.VPNProvision, otunUsed int64) {
 	if !s.entitlementEnabled() || resp == nil || vp == nil {
@@ -1627,7 +1629,7 @@ func (f RealmFace) isCampaign() bool {
 // 故非住宅线路直接返回 ErrNoRealmAssignment，避免把标准面 uuid 送进 realm 接口。
 //
 // 历史注记（缺省面沿用至今的理由）：持双面的用户若标准面 provision 后建
-//（如先订 residential 再买 basic/积分），按"取最新任意面"会拿到标准 uuid →
+// （如先订 residential 再买 basic/积分），按"取最新任意面"会拿到标准 uuid →
 // manager egresses 能列全局候选（200），但 select 在 realm_user_assignment
 // 找不到该标准 uuid → no_assignment（404），表现为"list 成功但 select 失败"的自相矛盾。
 // 按面锁定即可拿到真正有 assignment 的那个 uuid。
@@ -1700,11 +1702,11 @@ func (s *VPNService) ListRealmCountries(ctx context.Context, userID string, face
 }
 
 // RealmResponseWithRegions 在 otun 原始响应之上把 regions[] 归一化成契约 §2 形态
-//（nodes 摘要 + protocols[] 展开 + smart_strategy 整包），select-country / connect-url 两读口共用，
+// （nodes 摘要 + protocols[] 展开 + smart_strategy 整包），select-country / connect-url 两读口共用，
 // 与 /vpn/all 的 regions[]（buildVPNRegions 同源）同构。外层 Regions 与嵌入结构同名字段冲突时
 // encoding/json 取最浅层 → otun 原始骨架（nodes[].connect_urls 形态、无 protocols[]）被完全遮蔽。
 // 此前把骨架直接透传，前端按契约 §5.2 读 regions[].protocols 恒为 0 → 集内本地秒切存包无料可用
-//（2026-07-16 真机坐实）。
+// （2026-07-16 真机坐实）。
 type RealmResponseWithRegions struct {
 	*client.RealmConnectURLResponse
 	Regions []models.VPNRegion `json:"regions,omitempty"`
@@ -1844,21 +1846,34 @@ func (s *VPNService) calculateExpireAt(days int) time.Time {
 // resolvePaidStacking 付费同渠道再购（stripe→stripe / credit→credit …）的叠加裁决（纯函数，2026-09-23）。
 //
 // 规则（用户 2026-09-23 拍板，与 campaign 面 "7天10G+7天10G=14天20G" 及形态 B §2 订购桶同口径）：
-//   - 基准权益未过期 → 到期 = 基准到期 + 本次时长；上限 = 基准上限 + newLimit；stacked=true（已用保留）。
-//   - 基准已过期/缺失 → 到期 = now + 本次时长；上限 = newLimit；stacked=false（fresh period，与现状一致）。
+//   - 基准权益未过期 → 到期 = 基准到期 + 本次时长；上限合成一个总量（见下）；stacked=true（已用保留、不再月度清零）。
+//   - 基准已过期/缺失 → 到期 = now + 本次时长；上限 = newMonthlyLimit；stacked=false（fresh period，每 30 天清零）。
+//
+// ★合成总量口径（2026-11-18 用户定，设计稿 document/DESIGN_2026-11-18_PAID_STACKING_MULTI_MONTH_TRAFFIC.md）：
+// 一次性购买下发的 traffic_gb 是【每月额度】（不乘月数），叠加后整段不再清零，所以必须把月数乘进去：
+//
+//	新上限 = 基准上限 + n × 基准每月额度 + 新买月数 × newMonthlyLimit
+//
+// n = 基准订单还没清零的月份数（基准已是叠加态 / 拿不到 traffic_reset_at 时为 0）。
+// 此前只加 newMonthlyLimit：1 个月 + 3 个月 = 4 个月只给 200G，12 个月单第 1 个月再买会吞掉后面 11 个月。
 //
 // 本次时长按月购买时是自然月（2026-11-11，见 expire_span.go），否则按天。
 //
 // 基准取值：优先 otun-manager 实时账号 live（数据面真源，"用户实际还剩多少"），
 // live 为 nil 或 expire_at 不可解析时退回投影行 existing。此前只认 live、取不到就 now+days，
 // 住宅 uuid 在 manager 恒 404 → 叠加静默失效三个月（euanjam8 案）。
-func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo, now time.Time, span expireSpan, newLimit int64) (time.Time, int64, bool) {
-	var baseExpire *time.Time
+func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo, now time.Time, span expireSpan, newMonthlyLimit int64) (time.Time, int64, bool) {
+	var baseExpire, baseResetAt *time.Time
 	var baseLimit int64
 	if live != nil && live.ExpireAt != "" {
 		if t, err := time.Parse(time.RFC3339, live.ExpireAt); err == nil {
 			baseExpire = &t
 			baseLimit = live.TrafficLimit
+			if live.TrafficResetAt != "" {
+				if r, rerr := time.Parse(time.RFC3339, live.TrafficResetAt); rerr == nil {
+					baseResetAt = &r
+				}
+			}
 		} else {
 			log.Printf("[VPNService] stacking: unparsable live expire_at %q, falling back to projection row: %v", live.ExpireAt, err)
 		}
@@ -1869,9 +1884,41 @@ func resolvePaidStacking(existing *models.VPNProvision, live *client.VPNUserInfo
 		baseLimit = existing.TrafficLimit
 	}
 	if baseExpire == nil || !baseExpire.After(now) {
-		return span.endFrom(now), newLimit, false
+		return span.endFrom(now), newMonthlyLimit, false
 	}
-	return span.endFrom(*baseExpire), baseLimit + newLimit, true
+	if baseResetAt == nil {
+		// 投影行兜底 / 老 manager 不返回 traffic_reset_at：算不出基准剩余月份，只按 n=0 合成（少给不多给）。
+		log.Printf("[VPNService] WARNING: stacking without traffic_reset_at (base expire=%s); remaining base months counted as 0",
+			baseExpire.Format(time.RFC3339))
+	}
+	n := remainingUnresetPeriods(baseResetAt, *baseExpire, now)
+	limit := baseLimit + n*baseLimit + int64(span.purchasedMonths())*newMonthlyLimit
+	return span.endFrom(*baseExpire), limit, true
+}
+
+// remainingUnresetPeriods 基准订单在当前窗口之后还剩几个 30 天窗口没清零。
+//   - resetAt 为空：未知，按 0。
+//   - resetAt ≈ expire（相差 < 1 天）：已是叠加态（上限即总量），0。
+//   - 否则先把 resetAt 推进到 now 所在窗口（与 QuotaResetService 每 5 分钟推进同口径，防止
+//     刚好跨过清零点还没 tick），再 n = round((expire − resetAt) / 30 天) − 1。
+//     用 round：6 个自然月（181–184 天）是 6 个窗口而不是 7 个。
+func remainingUnresetPeriods(resetAt *time.Time, expire, now time.Time) int64 {
+	if resetAt == nil {
+		return 0
+	}
+	const window = 30 * 24 * time.Hour
+	r := *resetAt
+	if d := expire.Sub(r); d < 24*time.Hour && d > -24*time.Hour {
+		return 0
+	}
+	for !r.Add(window).After(now) && r.Add(window).Before(expire) {
+		r = r.Add(window)
+	}
+	n := int64(math.Round(expire.Sub(r).Hours()/24/30)) - 1
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // notifyVPNActive notifies subscription-service that VPN is active

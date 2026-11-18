@@ -63,6 +63,18 @@ func platformPeriodEnd(req *models.ProvisionRequest, now time.Time) *time.Time {
 	return &end
 }
 
+// purchasedMonths 本次买了几个月(叠加时流量 = 月数 × 每月额度,2026-11-18)。
+// 按月购买直接取 Months;老口径只有天数时按 30 天一月四舍五入,至少 1。
+func (p expireSpan) purchasedMonths() int {
+	if p.Months > 0 {
+		return p.Months
+	}
+	if m := int(math.Round(float64(p.Days) / 30)); m > 1 {
+		return m
+	}
+	return 1
+}
+
 // endFrom 返回从 base 起算的到期时间(平台订阅直接是平台 period_end)。
 func (p expireSpan) endFrom(base time.Time) time.Time {
 	if p.PlatformEnd != nil {
