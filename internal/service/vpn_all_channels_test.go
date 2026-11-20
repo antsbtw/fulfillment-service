@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wenwu/saas-platform/fulfillment-service/internal/models"
+	"github.com/wenwu/saas-platform/fulfillment-service/internal/repository"
 )
 
 // residentialRowNoUUID 模拟住宅面 current provision，OtunUUID 留空以避免触达 otunClient
@@ -131,5 +132,33 @@ func TestResolveResidentialOtunUUID_StandardOnlyHasNoResidential(t *testing.T) {
 	}
 	if err != nil && !errors.Is(err, ErrNoRealmAssignment) {
 		t.Fatalf("want nil or ErrNoRealmAssignment, got %v", err)
+	}
+}
+
+// errVPNStore 让按面查询返回指定错误(模拟查库失败 / 未找到)。
+type errVPNStore struct {
+	*fakeVPNStore
+	err error
+}
+
+func (f *errVPNStore) GetCurrentByUserAndServicePartition(context.Context, string, bool) (*models.VPNProvision, error) {
+	return nil, f.err
+}
+
+// 定稿 BACKEND_REPLY_2026-11-19_CONNECT_TICKET_TOKEN_FINAL §2.2:查库出错必须报错(→5xx),
+// 不能吞成"没有这一面"——客户端会把「200 且无住宅条目」当成无权益而停住宅线。
+func TestQuickStatusAll_DBErrorIsError(t *testing.T) {
+	s := newSvc(true, &errVPNStore{fakeVPNStore: &fakeVPNStore{}, err: errors.New("conn reset")})
+	if out, err := s.GetUserVPNQuickStatusAll(context.Background(), "u1"); err == nil {
+		t.Fatalf("db error must surface, got %+v", out)
+	}
+}
+
+// 未找到(repository.ErrNotFound,真实仓库对无行的返回)仍是"没有这一面",200 空数组。
+func TestQuickStatusAll_NotFoundIsEmpty(t *testing.T) {
+	s := newSvc(true, &errVPNStore{fakeVPNStore: &fakeVPNStore{}, err: repository.ErrNotFound})
+	out, err := s.GetUserVPNQuickStatusAll(context.Background(), "u1")
+	if err != nil || out == nil || len(out) != 0 {
+		t.Fatalf("not found must be empty slice, got %#v %v", out, err)
 	}
 }

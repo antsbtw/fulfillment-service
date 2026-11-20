@@ -1550,7 +1550,12 @@ func (s *VPNService) GetUserVPNQuickStatusAll(ctx context.Context, userID string
 	for _, isResidential := range servicePartitions {
 		s.resolveEntitlementForRead(ctx, userID, isResidential)
 		vp, err := s.vpnRepo.GetCurrentByUserAndServicePartition(ctx, userID, isResidential)
-		if err != nil || vp == nil {
+		if err != nil && !errors.Is(err, repository.ErrNotFound) {
+			// ★不能当作"没有这一面"跳过(2026-11-20):客户端按定稿把「200 且无住宅条目」判为无住宅权益并停住宅线,
+			// 查库出错若被吞成空数组,付费用户会被误停。出错一律回 5xx,让客户端退避重查。
+			return nil, fmt.Errorf("get current provision (residential=%v): %w", isResidential, err)
+		}
+		if vp == nil {
 			continue
 		}
 		out = append(out, s.buildQuickStatus(ctx, vp))
