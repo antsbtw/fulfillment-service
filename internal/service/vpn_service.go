@@ -1544,8 +1544,25 @@ func (s *VPNService) GetUserVPNSubscribeConfigAllWithCaps(ctx context.Context, u
 }
 
 // GetUserVPNQuickStatusAll 一次返回该 user【所有持有的服务面】的轻量状态（方案 C）。
-// 标准面与住宅面各一条，未持有的面不进数组。
+// 标准面与住宅面各一条，未持有的面不进数组。老客户端（无能力声明）入口，与改动前逐字节一致。
 func (s *VPNService) GetUserVPNQuickStatusAll(ctx context.Context, userID string) ([]*models.VPNQuickStatus, error) {
+	return s.GetUserVPNQuickStatusAllWithCaps(ctx, userID, nil)
+}
+
+// GetUserVPNQuickStatusAllWithCaps 带能力集的 status-all（2026-11-20，住宅线鉴权失败处理定稿更正）。
+//
+// 客户端收到会合面/节点鉴权失败后查本口判断「正在运行的那条线」是否还有效。/vpn/all 对声明了
+// campaign-profile 的客户端会下发活动面（promo）元素，端上按 (plan_tier, service_tier) 分键；
+// 而本口原先只回 basic/residential 两个面——活动住宅用户查到的是自己那条（可能早已过期的）
+// 付费住宅行，会把正在用的活动住宅误判为到期而停线（生产 11-20：10 个活动住宅用户里 8 个如此）。
+//
+// 因此对声明了 campaign-profile 的客户端：
+//   - 每条都带 service_tier，与 /vpn/all 同一分键 (plan_tier, service_tier)；
+//   - 追加活动面每条线路一条（plan_tier=channel=promo），状态口径与其他面相同（sync 403 → expired + inactive_reason）。
+//
+// 无能力声明 → 与改动前完全一致（老客户端零回归）。
+func (s *VPNService) GetUserVPNQuickStatusAllWithCaps(ctx context.Context, userID string, caps ClientCapabilities) ([]*models.VPNQuickStatus, error) {
+	withCampaign := caps.Has(CapabilityCampaignProfile)
 	out := make([]*models.VPNQuickStatus, 0, len(servicePartitions))
 	for _, isResidential := range servicePartitions {
 		s.resolveEntitlementForRead(ctx, userID, isResidential)
@@ -1558,9 +1575,66 @@ func (s *VPNService) GetUserVPNQuickStatusAll(ctx context.Context, userID string
 		if vp == nil {
 			continue
 		}
-		out = append(out, s.buildQuickStatus(ctx, vp))
+		q := s.buildQuickStatus(ctx, vp)
+		if withCampaign {
+			q.ServiceTier = vp.ServiceTier
+		}
+		out = append(out, q)
+	}
+	if withCampaign {
+		rows, err := s.vpnRepo.ListCurrentByUserAndFace(ctx, userID, models.ProductFaceCampaign)
+		if err != nil && !errors.Is(err, repository.ErrNotFound) {
+			return nil, fmt.Errorf("list campaign provisions: %w", err)
+		}
+		for _, vp := range rows {
+			if q := s.buildCampaignQuickStatus(ctx, vp); q != nil {
+				out = append(out, q)
+			}
+		}
 	}
 	return out, nil
+}
+
+// buildCampaignQuickStatus 活动面单条线路的轻量状态。下发范围与 /vpn/all 的 buildCampaignElementFor 一致
+// （disabled/revoked/converted 不下发）；不走 entitlement 投影——投影按 service_tier 取面，会把付费住宅的
+// 权益算到活动住宅头上。
+func (s *VPNService) buildCampaignQuickStatus(ctx context.Context, vp *models.VPNProvision) *models.VPNQuickStatus {
+	if vp == nil || (vp.Status != models.VPNProvisionStatusActive && vp.Status != models.VPNProvisionStatusExpired) {
+		return nil
+	}
+	q := &models.VPNQuickStatus{
+		Status:       effectiveProvisionStatus(vp.Status, vp.ExpireAt),
+		Channel:      models.PlanTierCampaign,
+		PlanTier:     models.PlanTierCampaign,
+		ServiceTier:  vp.ServiceTier,
+		TrafficLimit: vp.TrafficLimit,
+		TrafficUsed:  vp.TrafficUsed,
+	}
+	if vp.ExpireAt != nil {
+		q.ExpireAt = vp.ExpireAt.UTC().Format(time.RFC3339)
+	}
+	if vp.OtunUUID != nil && *vp.OtunUUID != "" {
+		sync, err := s.otunClient.SyncUser(ctx, *vp.OtunUUID)
+		switch {
+		case err == nil && sync != nil:
+			if sync.ExpireAt != "" {
+				q.ExpireAt = sync.ExpireAt
+			}
+			q.TrafficUsed = sync.TrafficUsed
+			if sync.TrafficLimit > 0 {
+				q.TrafficLimit = sync.TrafficLimit
+			}
+		case isOTunAccountInactive(err):
+			q.Status = models.VPNProvisionStatusExpired
+			var inactive *client.OTunAccountInactiveError
+			if errors.As(err, &inactive) {
+				q.InactiveReason = inactive.Reason
+			}
+		default:
+			log.Printf("[VPNService] campaign quick status: sync failed uuid=%s: %v", *vp.OtunUUID, err)
+		}
+	}
+	return q
 }
 
 // UpdateUserEmail 更新用户邮箱（subscription-service 邮箱绑定事件触发）

@@ -571,7 +571,9 @@ func (h *Handler) GetUserVPNQuickStatusAll(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.vpnService.GetUserVPNQuickStatusAll(c.Request.Context(), userID)
+	// ★能力门控（2026-11-20）：BFF 透传 X-Client-Capabilities；含 campaign-profile 才带 service_tier 并追加活动面条目。
+	caps := service.ParseClientCapabilities(c.GetHeader("X-Client-Capabilities"))
+	resp, err := h.vpnService.GetUserVPNQuickStatusAllWithCaps(c.Request.Context(), userID, caps)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
 		return
